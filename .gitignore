@@ -1,5 +1,5 @@
 node_modules/
-build/
+/build/
 dist/*.dmg
 dist/*.zip
 .DS_Store
