@@ -1,10 +1,16 @@
 手術データ管理アプリ — インストール手順
 =========================================
 
-【1. インストールするDMGの選択】
+【1. ダウンロード／インストールするDMGの選択】
 
-  Apple Silicon Mac (M1/M2/M3/M4): 手術データ管理-0.2.0-arm64.dmg
-  Intel Mac:                       手術データ管理-0.2.0.dmg
+  Apple Silicon Mac (M1/M2/M3/M4): SurgeryDataManager-0.2.0-arm64.dmg
+  Intel Mac:                       SurgeryDataManager-0.2.0-x64.dmg
+
+  ◆ 公式配信URL（GitHub Releases）:
+    https://github.com/roon1115/surgery-data-manager/releases/latest
+
+  Dropbox配下にも同じDMGを配置しています:
+    手術データ管理アプリ/dist/
 
   対象Macが Apple Silicon か Intel かは、「このMacについて」→「チップ」で確認できます。
   わからない場合は両方を試してください（誤った方は起動できないだけで害はありません）。
