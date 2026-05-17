@@ -1,0 +1,54 @@
+{
+  "name": "surgery-data-manager",
+  "version": "0.2.0",
+  "description": "手術データ管理アプリ — 記録媒体からの差分インポートとDICOM送信",
+  "main": "electron/main.js",
+  "private": true,
+  "author": "Stella Animal Hospital",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --enable-logging",
+    "build:mac": "electron-builder --mac --arm64 --x64",
+    "build:mac:arm64": "electron-builder --mac --arm64",
+    "build:mac:x64": "electron-builder --mac --x64",
+    "rebuild": "electron-rebuild"
+  },
+  "devDependencies": {
+    "electron": "^42.0.0",
+    "electron-builder": "^25.0.0",
+    "@electron/rebuild": "^3.6.0"
+  },
+  "dependencies": {
+    "dcmjs-dimse": "^0.3.3",
+    "electron-store": "^8.2.0",
+    "heic-convert": "^2.1.0",
+    "sanitize-filename": "^1.6.3",
+    "wanakana": "^5.3.1"
+  },
+  "build": {
+    "appId": "jp.stella-vet.surgery-data-manager",
+    "productName": "手術データ管理",
+    "directories": {
+      "output": "/Users/macbookns/Build/SurgeryDataManager"
+    },
+    "files": [
+      "electron/**/*",
+      "www/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.medical",
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
+      ],
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "writeUpdateInfo": false
+    }
+  }
+}

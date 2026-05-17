@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:;">
+  <title>手術データ管理</title>
+  <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="dot"></span>
+      <span class="title">手術データ管理</span>
+    </div>
+    <nav class="steps">
+      <span class="step" data-step="patient">1. 患者情報</span>
+      <span class="step" data-step="source">2. 取り込み元</span>
+      <span class="step" data-step="ingest">3. コピー</span>
+      <span class="step" data-step="dicom">4. DICOM送信</span>
+      <span class="step" data-step="done">5. 完了</span>
+    </nav>
+    <button id="btn-settings" class="ghost">⚙ 設定</button>
+  </header>
+
+  <main id="app"></main>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <div id="modal-content"></div>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="ghost">キャンセル</button>
+        <button id="modal-ok" class="primary">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/utils.js"></script>
+  <script src="js/decode.js"></script>
+  <script src="js/views/settings.js"></script>
+  <script src="js/views/patient-form.js"></script>
+  <script src="js/views/source-pick.js"></script>
+  <script src="js/views/ingest-progress.js"></script>
+  <script src="js/views/dicom-send.js"></script>
+  <script src="js/views/done.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

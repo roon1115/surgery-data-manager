@@ -1,0 +1,7 @@
+{
+  "version": "0.1.0",
+  "pubDate": "2026-05-18",
+  "notes": "初版リリース。\n- 患者情報入力＋フォルダ自動作成\n- SHA-256ハッシュによる差分インポート\n- StellaDICOMへのC-STORE送信",
+  "url": "https://www.dropbox.com/scl/fi/.../手術データ管理-0.1.0-arm64.dmg?dl=1",
+  "urlX64": "https://www.dropbox.com/scl/fi/.../手術データ管理-0.1.0.dmg?dl=1"
+}
