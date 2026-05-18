@@ -1,6 +1,11 @@
 const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron');
 const path = require('path');
 
+// V8 起動安定化フラグ（Intel iMac 等で SIGTRAP するケースの保険）
+// JIT / メモリレイアウトの保守的な動作を強制
+app.commandLine.appendSwitch('disable-gpu-sandbox');
+app.commandLine.appendSwitch('no-sandbox');
+
 require('./settings-handler');
 require('./ingest-handler');
 require('./dicom-handler');
