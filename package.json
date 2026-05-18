@@ -1,6 +1,6 @@
 {
   "name": "surgery-data-manager",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "手術データ管理アプリ — 記録媒体からの差分インポートとDICOM送信",
   "main": "electron/main.js",
   "private": true,
