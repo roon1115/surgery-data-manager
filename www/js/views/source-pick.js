@@ -2,40 +2,50 @@ window.Views = window.Views || {};
 window.Views.source = (function() {
   const { el, formatBytes } = window.U;
 
+  const TYPE_OPTIONS = [
+    { key: 'anesthesia',     label: '麻酔モニター記録',  hint: 'CSV等' },
+    { key: 'surgicalPhoto',  label: '手術写真',         hint: '写真→DICOM自動送信対象' },
+    { key: 'laparoscope',    label: '腹腔鏡',           hint: '画像/動画' },
+    { key: 'bronchoscope',   label: '気管支鏡',         hint: '画像/動画' },
+    { key: 'endoscope',      label: '内視鏡',           hint: '画像/動画' },
+  ];
+
   async function render(state, mount) {
-    if (!state.sources) state.sources = []; // [{ path, name, files, summary, defaultKind, isSurgicalPhoto }]
+    if (!state.sources) state.sources = []; // [{ path, name, files, summary, type, useHashDiff }]
+    const cfg = state.settings || await window.App.settings.get();
+    state.settings = cfg;
+    const typeFolders = cfg.typeFolders || {};
 
     const banner = el('div', { class: 'banner' },
-      'SDカード等のソースを追加し、それぞれの中身に対して「写真／動画／CSV」の種別を選んでください。'
-      + '「手術写真として送信」をONにすると DICOM 送信対象になります。');
+      '接続されているデバイス（SDカード等）を選び、ソースごとに「種別」を1つ選んでください。'
+      + ' 種別ごとの保存先（サブフォルダ）は設定画面で事前に決められます。'
+      + ' 「手術写真」を選んだソースは、コピー後に DICOM サーバーへ自動送信できます。');
 
     const elList = el('div'); // ソース一覧表示
 
     const renderSources = () => {
       elList.innerHTML = '';
       if (state.sources.length === 0) {
-        elList.appendChild(el('div', { class: 'banner warn' }, '取り込み元がまだ追加されていません。'));
+        elList.appendChild(el('div', { class: 'banner warn' }, '取り込み元がまだ追加されていません。上のリストから追加してください。'));
+        return;
       }
       state.sources.forEach((src, idx) => {
         const summary = src.summary || { photo: 0, video: 0, csv: 0, other: 0, totalBytes: 0 };
-        const kindOptions = ['photo', 'video', 'csv', 'auto'];
-        const kindLabels = { photo: '写真', video: '動画', csv: '麻酔CSV', auto: '拡張子で自動判定' };
 
-        const elKindSelect = el('select');
-        kindOptions.forEach(k => {
-          const o = el('option', { value: k }, kindLabels[k]);
-          if (src.defaultKind === k) o.selected = true;
-          elKindSelect.appendChild(o);
+        // 種別ラジオ
+        const elTypeSelect = el('select');
+        TYPE_OPTIONS.forEach(opt => {
+          const o = el('option', { value: opt.key }, opt.label);
+          if (src.type === opt.key) o.selected = true;
+          elTypeSelect.appendChild(o);
         });
-        elKindSelect.addEventListener('change', () => {
-          src.defaultKind = elKindSelect.value;
+        elTypeSelect.addEventListener('change', () => {
+          src.type = elTypeSelect.value;
+          renderSources(); // 再描画して送信先プレビューを更新
         });
 
-        const elSurgical = el('input', { type: 'checkbox' });
-        elSurgical.checked = !!src.isSurgicalPhoto;
-        elSurgical.addEventListener('change', () => {
-          src.isSurgicalPhoto = elSurgical.checked;
-        });
+        const subfolder = typeFolders[src.type] || '(未設定)';
+        const isDicom = src.type === 'surgicalPhoto';
 
         const elIncremental = el('input', { type: 'checkbox' });
         elIncremental.checked = src.useHashDiff !== false;
@@ -54,20 +64,20 @@ window.Views.source = (function() {
               el('div', { style: { fontWeight: '600', fontSize: '13px' } }, src.name),
               el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)' } }, src.path),
             ),
-            el('div', { style: { flex: '1' } }, removeBtn),
+            el('div', { style: { flex: '1', textAlign: 'right' } }, removeBtn),
           ),
           el('div', { class: 'summary' },
             el('div', { class: 'stat' },
+              el('div', { class: 'num' }, String(src.files?.length || 0)),
+              el('div', { class: 'label' }, '総ファイル数'),
+            ),
+            el('div', { class: 'stat' },
               el('div', { class: 'num' }, String(summary.photo)),
-              el('div', { class: 'label' }, '写真'),
+              el('div', { class: 'label' }, '画像'),
             ),
             el('div', { class: 'stat' },
               el('div', { class: 'num' }, String(summary.video)),
               el('div', { class: 'label' }, '動画'),
-            ),
-            el('div', { class: 'stat' },
-              el('div', { class: 'num' }, String(summary.csv)),
-              el('div', { class: 'label' }, 'CSV'),
             ),
             el('div', { class: 'stat' },
               el('div', { class: 'num' }, formatBytes(summary.totalBytes)),
@@ -76,12 +86,10 @@ window.Views.source = (function() {
           ),
           el('div', { class: 'row' },
             el('label', { class: 'field' },
-              el('span', { class: 'label' }, 'このソースの既定種別'),
-              elKindSelect,
-            ),
-            el('label', { class: 'field' },
-              el('span', { class: 'label' }, '手術写真として送信（DICOM対象）'),
-              el('div', { class: 'checkbox' }, elSurgical, ' ON でDICOMサーバーへC-STORE送信'),
+              el('span', { class: 'label required' }, 'このソースの種別'),
+              elTypeSelect,
+              el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginTop: '2px' } },
+                src.type ? `保存先: 患者フォルダ / ${subfolder} /` + (isDicom ? '   ＋DICOM送信候補' : '') : '⚠ 種別を選択してください'),
             ),
             el('label', { class: 'field' },
               el('span', { class: 'label' }, '差分インポート（前回以降のみ）'),
@@ -103,7 +111,7 @@ window.Views.source = (function() {
         return;
       }
       if (r.volumes.length === 0) {
-        elVolumes.appendChild(el('li', null, '検出されたボリュームはありません。'));
+        elVolumes.appendChild(el('li', null, '検出されたボリュームはありません。SDカード等を接続してから「再読み込み」を押してください。'));
         return;
       }
       r.volumes.forEach(vol => {
@@ -124,13 +132,17 @@ window.Views.source = (function() {
         U.modal({ title: 'スキャン失敗', body: scan.error || '' });
         return;
       }
+      // 既存と重複しないよう確認
+      if (state.sources.some(s => s.path === srcPath)) {
+        U.modal({ title: '追加済み', body: 'このソースはすでに追加されています。' });
+        return;
+      }
       state.sources.push({
         path: srcPath,
         name: srcName,
         files: scan.files,
         summary: scan.summary,
-        defaultKind: 'auto',
-        isSurgicalPhoto: false,
+        type: '',           // 未選択。ユーザーが必ず選ぶ
         useHashDiff: true,
       });
       renderSources();
@@ -151,6 +163,11 @@ window.Views.source = (function() {
         U.modal({ title: 'ソース未選択', body: '取り込み元を1つ以上追加してください。' });
         return;
       }
+      const missingType = state.sources.find(s => !s.type);
+      if (missingType) {
+        U.modal({ title: '種別未選択', body: `「${missingType.name}」の種別を選択してください。` });
+        return;
+      }
       const totalFiles = state.sources.reduce((s, src) => s + (src.files?.length || 0), 0);
       if (totalFiles === 0) {
         U.modal({ title: 'ファイルなし', body: '選択されたソースに取り込み可能なファイルがありません。' });
@@ -161,7 +178,7 @@ window.Views.source = (function() {
 
     const root = el('div', null,
       el('div', { class: 'card' },
-        el('h2', null, '取り込み元を選ぶ'),
+        el('h2', null, '取り込み元（接続デバイス）を選ぶ'),
         banner,
         el('h3', null, '検出されたボリューム（' + (window.App.platform === 'darwin' ? '/Volumes' : 'ドライブ') + '）'),
         el('div', { class: 'row', style: { marginBottom: '8px' } }, reloadBtn, chooseBtn),

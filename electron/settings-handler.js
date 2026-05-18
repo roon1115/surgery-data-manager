@@ -16,15 +16,34 @@ const store = new Store({
     },
     folderPattern: '{date}_{id}_{name}_{procedure}',
     updateUrl: 'https://github.com/roon1115/surgery-data-manager/releases/latest/download/latest.json',
+    typeFolders: {
+      anesthesia: '麻酔記録',
+      surgicalPhoto: '手術写真',
+      laparoscope: '腹腔鏡',
+      bronchoscope: '気管支鏡',
+      endoscope: '内視鏡',
+    },
   },
 });
 
+const DEFAULT_TYPE_FOLDERS = {
+  anesthesia: '麻酔記録',
+  surgicalPhoto: '手術写真',
+  laparoscope: '腹腔鏡',
+  bronchoscope: '気管支鏡',
+  endoscope: '内視鏡',
+};
+
 function getAll() {
+  const tf = store.get('typeFolders') || {};
+  // 既存設定にキーが欠けていてもデフォルトで補完
+  const typeFolders = { ...DEFAULT_TYPE_FOLDERS, ...tf };
   return {
     outputRoot: store.get('outputRoot'),
     dicom: store.get('dicom'),
     folderPattern: store.get('folderPattern'),
     updateUrl: store.get('updateUrl'),
+    typeFolders,
   };
 }
 
@@ -38,6 +57,10 @@ ipcMain.handle('settings:save', async (_e, partial = {}) => {
   }
   if (typeof partial.folderPattern === 'string') store.set('folderPattern', partial.folderPattern);
   if (typeof partial.updateUrl === 'string') store.set('updateUrl', partial.updateUrl);
+  if (partial.typeFolders && typeof partial.typeFolders === 'object') {
+    const cur = store.get('typeFolders') || {};
+    store.set('typeFolders', { ...DEFAULT_TYPE_FOLDERS, ...cur, ...partial.typeFolders });
+  }
   return getAll();
 });
 

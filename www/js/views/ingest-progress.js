@@ -122,15 +122,17 @@ window.Views.ingest = (function() {
     logLine('出力先: ' + prep.target, 'ok');
 
     // 2. ファイル一覧の集約
+    // 各ソースには src.type (anesthesia/surgicalPhoto/laparoscope/bronchoscope/endoscope) が
+    // ユーザーにより1つ指定されている。全ファイルにその type と useHashDiff を付与。
     const allFiles = [];
     for (const src of state.sources) {
+      if (!src.type) continue; // 種別未選択は無視（呼び出し前にバリデート済）
+      const srcDiff = src.useHashDiff !== false;
       for (const f of src.files) {
-        const kind = inferKindFromExt(f.path, src.defaultKind);
-        if (kind === 'other' && src.defaultKind !== 'auto') continue;
         allFiles.push({
           ...f,
-          kind,
-          isSurgicalPhoto: !!src.isSurgicalPhoto && kind === 'photo',
+          type: src.type,            // ingest-handler が見るキー
+          useHashDiff: srcDiff,      // ソース単位の差分判定設定
           sourcePath: src.path,
         });
       }

@@ -25,6 +25,14 @@ window.Views.settings = (function() {
     );
     elTs.value = cfg.dicom.transferSyntax || '1.2.840.10008.1.2';
 
+    // 5種別の保存先サブフォルダ名入力
+    const tf = cfg.typeFolders || {};
+    const elTfAnesthesia = el('input', { type: 'text', value: tf.anesthesia || '麻酔記録', placeholder: '麻酔記録' });
+    const elTfSurgicalPhoto = el('input', { type: 'text', value: tf.surgicalPhoto || '手術写真', placeholder: '手術写真' });
+    const elTfLaparoscope = el('input', { type: 'text', value: tf.laparoscope || '腹腔鏡', placeholder: '腹腔鏡' });
+    const elTfBronchoscope = el('input', { type: 'text', value: tf.bronchoscope || '気管支鏡', placeholder: '気管支鏡' });
+    const elTfEndoscope = el('input', { type: 'text', value: tf.endoscope || '内視鏡', placeholder: '内視鏡' });
+
     const elUpdateUrl = el('input', {
       type: 'text',
       value: cfg.updateUrl || '',
@@ -81,6 +89,13 @@ window.Views.settings = (function() {
           transferSyntax: elTs.value,
         },
         updateUrl: elUpdateUrl.value.trim(),
+        typeFolders: {
+          anesthesia: elTfAnesthesia.value.trim() || '麻酔記録',
+          surgicalPhoto: elTfSurgicalPhoto.value.trim() || '手術写真',
+          laparoscope: elTfLaparoscope.value.trim() || '腹腔鏡',
+          bronchoscope: elTfBronchoscope.value.trim() || '気管支鏡',
+          endoscope: elTfEndoscope.value.trim() || '内視鏡',
+        },
       };
       await window.App.settings.save(partial);
       state.settings = await window.App.settings.get();
@@ -115,6 +130,19 @@ window.Views.settings = (function() {
         echoBtn,
         echoStatus,
       ),
+      el('h3', null, '種別ごとの保存先サブフォルダ'),
+      el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginBottom: '6px' } },
+        '患者フォルダ配下に作成されるサブフォルダ名。空欄にすると既定値が使われます。'),
+      el('div', { class: 'row' },
+        el('label', { class: 'field' }, el('span', { class: 'label' }, '麻酔モニター記録'), elTfAnesthesia),
+        el('label', { class: 'field' }, el('span', { class: 'label' }, '手術写真（DICOM送信対象）'), elTfSurgicalPhoto),
+      ),
+      el('div', { class: 'row' },
+        el('label', { class: 'field' }, el('span', { class: 'label' }, '腹腔鏡'), elTfLaparoscope),
+        el('label', { class: 'field' }, el('span', { class: 'label' }, '気管支鏡'), elTfBronchoscope),
+        el('label', { class: 'field' }, el('span', { class: 'label' }, '内視鏡'), elTfEndoscope),
+      ),
+
       el('h3', null, '自動アップデート'),
       el('label', { class: 'field' },
         el('span', { class: 'label' }, 'latest.json の配信URL（任意）'),

@@ -133,14 +133,13 @@ ipcMain.handle('ingest:prepareTarget', async (_e, args = {}) => {
 
   try {
     fs.mkdirSync(target, { recursive: true });
-    fs.mkdirSync(path.join(target, 'photos'), { recursive: true });
-    fs.mkdirSync(path.join(target, 'videos'), { recursive: true });
-    fs.mkdirSync(path.join(target, 'anesthesia'), { recursive: true });
+    // 種別別サブフォルダは ingest 開始時に必要なものだけ作成する。
+    // ここでは患者ルートだけ確実に作る。
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
   }
 
-  return { ok: true, target, collision, folderName };
+  return { ok: true, target, collision, folderName, typeFolders: cfg.typeFolders };
 });
 
 function hashFile(filePath) {
@@ -168,10 +167,16 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
   const { target, files, patient, useHashDiff } = args;
   if (!target || !Array.isArray(files)) return { ok: false, error: 'invalid args' };
 
-  const subdirOf = (kind) => {
-    if (kind === 'photo') return 'photos';
-    if (kind === 'video') return 'videos';
-    if (kind === 'csv') return 'anesthesia';
+  const cfg = settings.getAll();
+  const typeFolders = cfg.typeFolders || {};
+
+  // ファイル単位の type (= 5種別の英語キー) から保存サブフォルダ名を引く
+  const subdirOf = (type) => {
+    if (type && typeFolders[type]) return typeFolders[type];
+    // 旧キーや未指定はフォールバック
+    if (type === 'photo') return typeFolders.surgicalPhoto || '手術写真';
+    if (type === 'video') return typeFolders.surgicalPhoto || '手術写真';
+    if (type === 'csv') return typeFolders.anesthesia || '麻酔記録';
     return 'other';
   };
 
@@ -197,9 +202,12 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
       totalBytes,
     });
 
+    // ファイル個別 useHashDiff があればそれを尊重、なければ呼び出し時の useHashDiff にフォールバック
+    const diffEnabled = (f.useHashDiff !== undefined) ? f.useHashDiff : useHashDiff;
+
     try {
       let sha = null;
-      if (useHashDiff) {
+      if (diffEnabled) {
         sha = await hashFile(f.path);
         if (db.hasHash(sha)) {
           skippedDup++;
@@ -209,7 +217,9 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
         }
       }
 
-      const subdir = subdirOf(f.kind || classifyByExt(path.extname(f.path)));
+      // f.type が 5種別(anesthesia/surgicalPhoto/laparoscope/bronchoscope/endoscope)、
+      // 後方互換で f.kind (photo/video/csv) も受ける
+      const subdir = subdirOf(f.type || f.kind || classifyByExt(path.extname(f.path)));
       const ext = path.extname(f.path);
       const base = path.basename(f.path, ext);
       let dstName = `${base}${ext}`;
@@ -224,7 +234,7 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
 
       await copyStream(f.path, dst);
 
-      if (useHashDiff && sha) {
+      if (diffEnabled && sha) {
         const dstSha = await hashFile(dst);
         if (dstSha !== sha) {
           fs.unlinkSync(dst);
@@ -236,7 +246,7 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
       }
 
       const stat = fs.statSync(f.path);
-      if (useHashDiff && sha) {
+      if (diffEnabled && sha) {
         db.recordFile({
           sha256: sha,
           srcPath: f.path,
@@ -244,15 +254,20 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
           size: stat.size,
           mtime: Math.floor(stat.mtimeMs),
           patientId: patient?.id,
-          kind: f.kind,
+          kind: f.type || f.kind,
         });
       }
 
       copied++;
       doneBytes += f.size || 0;
 
-      if (f.kind === 'photo' && f.isSurgicalPhoto) {
-        dicomCandidates.push({ path: dst, name: dstName });
+      // DICOM 送信対象: 種別が surgicalPhoto なら自動的に候補入り
+      // ファイル拡張子が画像系であることも軽くチェック
+      if (f.type === 'surgicalPhoto') {
+        const e = ext.toLowerCase();
+        if (['.jpg','.jpeg','.png','.heic','.heif','.bmp'].includes(e)) {
+          dicomCandidates.push({ path: dst, name: dstName });
+        }
       }
 
       emitProgress({
