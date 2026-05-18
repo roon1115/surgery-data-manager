@@ -122,6 +122,7 @@ window.Views.ingest = (function() {
     logLine('出力先: ' + prep.target, 'ok');
 
     // 2. ファイル一覧の集約
+    // プレビュー画面で f.selected = true のものだけが対象。
     // 各ソースには src.type (anesthesia/surgicalPhoto/laparoscope/bronchoscope/endoscope) が
     // ユーザーにより1つ指定されている。全ファイルにその type と useHashDiff を付与。
     const allFiles = [];
@@ -129,6 +130,7 @@ window.Views.ingest = (function() {
       if (!src.type) continue; // 種別未選択は無視（呼び出し前にバリデート済）
       const srcDiff = src.useHashDiff !== false;
       for (const f of src.files) {
+        if (f.selected === false) continue; // プレビューで除外されたファイル
         allFiles.push({
           ...f,
           type: src.type,            // ingest-handler が見るキー

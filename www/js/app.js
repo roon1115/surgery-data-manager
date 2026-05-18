@@ -30,7 +30,7 @@
     },
   };
 
-  const stepOrder = ['settings', 'patient', 'source', 'ingest', 'dicom', 'done'];
+  const stepOrder = ['settings', 'patient', 'source', 'preview', 'ingest', 'dicom', 'done'];
 
   async function render() {
     console.log('[app] render step=', state.step);

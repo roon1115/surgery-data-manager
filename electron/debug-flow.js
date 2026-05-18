@@ -129,7 +129,7 @@ async function runChecks(win) {
         log('   ok:', upd4.ok, 'error:', upd4.error);
 
         log('10. views check — レンダリング可能か');
-        const views = ['settings','patient','source','ingest','dicom','done'];
+        const views = ['settings','patient','source','preview','ingest','dicom','done'];
         for (const v of views) {
           log('   view exists:', v, typeof window.Views[v]?.render === 'function');
         }
@@ -140,7 +140,7 @@ async function runChecks(win) {
           step: 'patient',
           settings: await window.App.settings.get(),
           patient: { id: 'P0001', name: 'モモ', nameRomaji: 'MOMO', procedure: '去勢術', date: '2026-05-17' },
-          sources: [{ path: '/tmp', name: 'TestSource', files: [], summary: {photo:0,video:0,csv:0,other:0,totalBytes:0}, defaultKind: 'auto', useHashDiff: true }],
+          sources: [{ path: '/tmp', name: 'TestSource', files: [{ path: '/tmp/a.jpg', ext: '.jpg', size: 100, selected: true }], summary: {photo:1,video:0,csv:0,other:0,totalBytes:100}, type: 'surgicalPhoto', useHashDiff: true }],
           targetFolder: '/tmp/test',
           ingestResult: { copied: 3, skippedDup: 1, failed: 0, dicomCandidates: [{ path: '/tmp/a.jpg', name: 'a.jpg' }] },
           dicomResult: null,

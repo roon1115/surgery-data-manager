@@ -173,7 +173,7 @@ window.Views.source = (function() {
         U.modal({ title: 'ファイルなし', body: '選択されたソースに取り込み可能なファイルがありません。' });
         return;
       }
-      state.goto('ingest');
+      state.goto('preview');
     };
 
     const root = el('div', null,
@@ -189,7 +189,7 @@ window.Views.source = (function() {
         elList,
         el('div', { class: 'actions between' },
           el('button', { class: 'ghost', onclick: () => state.goto('patient') }, '← 患者情報へ'),
-          el('button', { class: 'primary', onclick: onNext }, '次へ：コピー開始 →'),
+          el('button', { class: 'primary', onclick: onNext }, '次へ：プレビュー →'),
         ),
       ),
     );
