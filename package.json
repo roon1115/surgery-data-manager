@@ -1,6 +1,6 @@
 {
   "name": "surgery-data-manager",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "手術データ管理アプリ — 記録媒体からの差分インポートとDICOM送信",
   "main": "electron/main.js",
   "private": true,
@@ -29,8 +29,7 @@
   },
   "build": {
     "appId": "jp.stella-vet.surgery-data-manager",
-    "productName": "手術データ管理",
-    "executableName": "SurgeryDataManager",
+    "productName": "Surgery Data Manager",
     "directories": {
       "output": "/Users/macbookns/Build/SurgeryDataManager",
       "buildResources": "electron/build"

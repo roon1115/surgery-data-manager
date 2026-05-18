@@ -16,7 +16,7 @@ function createWindow() {
     height: 760,
     minWidth: 900,
     minHeight: 640,
-    title: '手術データ管理',
+    title: 'Surgery Data Manager',
     backgroundColor: '#0f172a',
     titleBarStyle: isMac ? 'hiddenInset' : 'default',
     webPreferences: {
