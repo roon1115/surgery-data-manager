@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron')
 const path = require('path');
 
 require('./settings-handler');
+require('./history');
 require('./ingest-handler');
 require('./dicom-handler');
 require('./updater');

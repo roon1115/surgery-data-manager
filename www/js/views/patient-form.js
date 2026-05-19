@@ -1,6 +1,20 @@
 window.Views = window.Views || {};
 window.Views.patient = (function() {
-  const { el, todayIso, sanitize, toRomaji } = window.U;
+  const { el, todayIso, sanitize, toRomaji, formatBytes } = window.U;
+
+  function formatRelTime(ts) {
+    if (!ts) return '';
+    const diff = Date.now() - ts;
+    const min = Math.floor(diff / 60000);
+    if (min < 1) return 'たった今';
+    if (min < 60) return `${min}分前`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}時間前`;
+    const day = Math.floor(hr / 24);
+    if (day < 30) return `${day}日前`;
+    const d = new Date(ts);
+    return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+  }
 
   async function render(state, mount) {
     if (!state.patient) {
@@ -17,6 +31,10 @@ window.Views.patient = (function() {
     const elDate = el('input', { type: 'date', value: p.date });
     const elPreview = el('div', { class: 'preview' }, '—');
     const elDicomPreview = el('div', { class: 'preview', style: { background: 'rgba(245,158,11,0.1)' } }, '—');
+
+    // 「呼び出し中」バッジ（履歴から呼び出した場合に表示）
+    const recallBadge = el('div', { class: 'banner ok', style: { display: state.isExistingPatient ? 'block' : 'none' } },
+      '過去の患者から呼び出し中：同じ患者フォルダにデータを追記します（衝突確認なし）');
 
     function updatePreview() {
       const id = sanitize(elId.value);
@@ -41,16 +59,73 @@ window.Views.patient = (function() {
       elDicomPreview.textContent = `PatientID: ${dicomId || '(空)'} / PatientName: ${dicomName || '(空)'}`;
     }
 
-    elId.addEventListener('input', updatePreview);
-    elName.addEventListener('input', updatePreview);
-    elProcedure.addEventListener('input', updatePreview);
-    elDate.addEventListener('input', updatePreview);
+    elId.addEventListener('input', () => { state.isExistingPatient = false; recallBadge.style.display = 'none'; updatePreview(); });
+    elName.addEventListener('input', () => { state.isExistingPatient = false; recallBadge.style.display = 'none'; updatePreview(); });
+    elProcedure.addEventListener('input', () => { state.isExistingPatient = false; recallBadge.style.display = 'none'; updatePreview(); });
+    elDate.addEventListener('input', () => { state.isExistingPatient = false; recallBadge.style.display = 'none'; updatePreview(); });
     elNameRomaji.addEventListener('input', () => {
       elNameRomaji.dataset.manual = '1';
       updatePreview();
     });
 
     updatePreview();
+
+    // 過去患者から呼び出し
+    function applyRecalled(item) {
+      const pt = item.patient || {};
+      elId.value = pt.id || '';
+      elName.value = pt.name || '';
+      elNameRomaji.value = pt.nameRomaji || '';
+      elNameRomaji.dataset.manual = '1';
+      elProcedure.value = pt.procedure || '';
+      elDate.value = pt.date || todayIso();
+      state.isExistingPatient = true;
+      recallBadge.style.display = 'block';
+      updatePreview();
+    }
+
+    const recentListEl = el('div');
+    async function renderRecent() {
+      const r = await window.App.history.listRecent({ limit: 30 });
+      recentListEl.innerHTML = '';
+      if (!r.ok || !r.items || r.items.length === 0) {
+        recentListEl.appendChild(el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)' } },
+          '過去の取り込み履歴はまだありません。'));
+        return;
+      }
+      const ul = el('ul', { class: 'volume-list', style: { maxHeight: '260px' } });
+      r.items.forEach(item => {
+        const pt = item.patient || {};
+        const selectBtn = el('button', { class: 'primary', onclick: () => applyRecalled(item) }, '呼び出す');
+        const removeBtn = el('button', { class: 'ghost', style: { fontSize: '11px' }, onclick: async () => {
+          if (!confirm(`「${item.folderName}」を履歴から削除しますか？（フォルダ自体は残ります）`)) return;
+          await window.App.history.remove(item.folderName);
+          renderRecent();
+        }}, '削除');
+        ul.appendChild(el('li', null,
+          el('div', { style: { flex: '1', minWidth: 0 } },
+            el('div', { style: { fontWeight: '500', fontSize: '13px' } }, item.folderName),
+            el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)' } },
+              `${pt.procedure || ''}　|　最終: ${formatRelTime(item.lastIngestAt)}　|　取り込み ${item.ingestCount || 1}回 / ${item.totalFiles || 0}ファイル`),
+          ),
+          selectBtn, ' ', removeBtn,
+        ));
+      });
+      recentListEl.appendChild(ul);
+    }
+    renderRecent();
+
+    const recallCard = el('div', { class: 'card', style: { background: 'var(--bg)' } },
+      el('div', { class: 'row', style: { alignItems: 'center', marginBottom: '8px' } },
+        el('div', { style: { flex: '1' } },
+          el('h3', { style: { margin: 0 } }, '過去の患者から呼び出す'),
+          el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginTop: '2px' } },
+            'SDカードを差し替えて同じ症例のデータを追加で取り込む場合に使います。'),
+        ),
+        el('button', { class: 'ghost', onclick: renderRecent }, '↻ 更新'),
+      ),
+      recentListEl,
+    );
 
     const onNext = () => {
       if (!elId.value.trim()) {
@@ -83,9 +158,10 @@ window.Views.patient = (function() {
       ? el('div', { class: 'banner warn' }, '出力ルートが未設定です。先に設定画面で指定してください。')
       : el('div', { class: 'banner ok' }, `出力ルート: ${cfg.outputRoot}`);
 
-    const root = el('div', { class: 'card' },
+    const formCard = el('div', { class: 'card' },
       el('h2', null, '患者情報'),
       cfgWarn,
+      recallBadge,
       el('div', { class: 'row' },
         el('label', { class: 'field' },
           el('span', { class: 'label required' }, '患者ID'),
@@ -112,7 +188,7 @@ window.Views.patient = (function() {
       ),
       el('h3', null, 'プレビュー'),
       el('div', { class: 'field' },
-        el('span', { class: 'label' }, 'フォルダ名（NAS上に作成）'),
+        el('span', { class: 'label' }, 'フォルダ名'),
         elPreview,
       ),
       el('div', { class: 'field' },
@@ -125,7 +201,7 @@ window.Views.patient = (function() {
       ),
     );
 
-    mount.replaceChildren(root);
+    mount.replaceChildren(el('div', null, recallCard, formCard));
   }
 
   return { render };

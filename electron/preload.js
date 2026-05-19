@@ -35,6 +35,11 @@ contextBridge.exposeInMainWorld('App', {
     },
   },
 
+  history: {
+    listRecent: (args) => ipcRenderer.invoke('history:listRecent', args || {}),
+    remove: (folderName) => ipcRenderer.invoke('history:remove', { folderName }),
+  },
+
   dicom: {
     echo: (args) => ipcRenderer.invoke('dicom:echo', args),
     sendStudy: (args) => ipcRenderer.invoke('dicom:sendStudy', args),

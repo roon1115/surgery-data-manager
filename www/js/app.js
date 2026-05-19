@@ -26,6 +26,8 @@
       state.sources = [];
       state.targetFolder = null;
       state.targets = null;
+      state.folderName = null;
+      state.isExistingPatient = false;
       state.ingestResult = null;
       state.dicomResult = null;
     },

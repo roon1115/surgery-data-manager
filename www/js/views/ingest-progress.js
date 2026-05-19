@@ -4,10 +4,12 @@ window.Views.ingest = (function() {
 
   async function prepareTarget(state) {
     const usedTypes = [...new Set(state.sources.filter(s => s.type).map(s => s.type))];
+    // 履歴から呼び出した患者なら衝突確認なしで追記モード ('keep')
+    const onCollision = state.isExistingPatient ? 'keep' : (state.onCollision || 'keep');
     const r = await window.App.ingest.prepareTarget({
       patient: state.patient,
       date: state.patient.date,
-      onCollision: state.onCollision || 'keep',
+      onCollision,
       types: usedTypes,
     });
     if (!r.ok && r.collision) {
@@ -123,6 +125,7 @@ window.Views.ingest = (function() {
       return;
     }
     state.targets = prep.targets || {};
+    state.folderName = prep.folderName;
     // 表示用: 最初の種別の patient folder を代表として保持
     const firstType = Object.keys(state.targets)[0];
     state.targetFolder = firstType ? state.targets[firstType] : null;
@@ -180,6 +183,7 @@ window.Views.ingest = (function() {
       targets: state.targets,
       files: allFiles,
       patient: state.patient,
+      folderName: state.folderName,
       useHashDiff,
     });
     off();

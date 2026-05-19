@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const sanitize = require('sanitize-filename');
 const settings = require('./settings-handler');
 const db = require('./db');
+const history = require('./history');
 
 const PHOTO_EXT = new Set(['.jpg', '.jpeg', '.png', '.heic', '.heif', '.tif', '.tiff', '.bmp']);
 const VIDEO_EXT = new Set(['.mp4', '.mov', '.m4v', '.avi', '.mts', '.mxf', '.mkv']);
@@ -326,6 +327,16 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
   }
 
   emitProgress({ type: 'done', copied, skippedDup, failed });
+
+  // 履歴に記録（1ファイル以上コピーまたはスキップで再取込が起きた場合）
+  if ((copied > 0 || skippedDup > 0) && args.folderName) {
+    history.recordSession({
+      folderName: args.folderName,
+      patient: patient || {},
+      targets,
+      filesAdded: copied,
+    });
+  }
 
   return {
     ok: failed === 0,
