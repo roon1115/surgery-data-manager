@@ -84,6 +84,7 @@ window.U = (function() {
     else if (body instanceof Node) content.appendChild(body);
     okBtn.textContent = okText;
     cancelBtn.textContent = cancelText;
+    cancelBtn.style.display = cancelText ? '' : 'none';
     m.classList.remove('hidden');
     const cleanup = () => {
       m.classList.add('hidden');

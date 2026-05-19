@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('App', {
     scanSource: (args) => ipcRenderer.invoke('ingest:scanSource', args),
     prepareTarget: (args) => ipcRenderer.invoke('ingest:prepareTarget', args),
     start: (args) => ipcRenderer.invoke('ingest:start', args),
+    ejectVolume: (volumePath) => ipcRenderer.invoke('ingest:ejectVolume', { volumePath }),
     onProgress: (cb) => {
       const listener = (_e, data) => cb(data);
       ipcRenderer.on('ingest:progress', listener);

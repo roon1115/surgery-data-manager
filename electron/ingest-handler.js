@@ -349,4 +349,25 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
   };
 });
 
+// /Volumes/ 配下のボリュームを eject する（macOS: diskutil eject）
+ipcMain.handle('ingest:ejectVolume', async (_e, args = {}) => {
+  const { volumePath } = args;
+  if (typeof volumePath !== 'string' || !volumePath.startsWith('/Volumes/')) {
+    return { ok: false, error: '/Volumes/ 配下のパスのみ取り外せます' };
+  }
+  if (!fs.existsSync(volumePath)) {
+    return { ok: false, error: '既に取り外されています', alreadyEjected: true };
+  }
+  return new Promise((resolve) => {
+    const { execFile } = require('child_process');
+    execFile('/usr/sbin/diskutil', ['eject', volumePath], { timeout: 30000 }, (err, stdout, stderr) => {
+      if (err) {
+        resolve({ ok: false, error: (stderr || err.message || '').trim() });
+      } else {
+        resolve({ ok: true, message: stdout.trim() });
+      }
+    });
+  });
+});
+
 module.exports = {};
