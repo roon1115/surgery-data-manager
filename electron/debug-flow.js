@@ -107,30 +107,9 @@ async function runChecks(win) {
         log('   ok:', study2.ok, 'error:', study2.error);
         // network 失敗で ok=false だが、エラーが network 由来なら dataset 構築自体は成功している
 
-        log('9d. updater check (URL未設定 — error 返す)');
-        await window.App.settings.save({ updateUrl: '' });
-        const updNo = await window.App.updater.check({ dryRun: true });
-        log('   ok:', updNo.ok, 'error:', updNo.error);
-
-        log('9e. updater check (新版あり — テストサーバー)');
-        await window.App.settings.save({ updateUrl: 'http://localhost:8766/latest.json' });
+        log('9d. updater check (固定URL: GitHub Releases)');
         const upd = await window.App.updater.check({ dryRun: true });
         log('   ok:', upd.ok, 'hasUpdate:', upd.hasUpdate, 'latest:', upd.latestVersion, 'current:', upd.currentVersion);
-
-        log('9f. updater check (同一バージョン — hasUpdate:false)');
-        await window.App.settings.save({ updateUrl: 'http://localhost:8766/latest-same.json' });
-        const upd2 = await window.App.updater.check({ dryRun: true });
-        log('   ok:', upd2.ok, 'hasUpdate:', upd2.hasUpdate);
-
-        log('9g. updater check (古いバージョン — hasUpdate:false)');
-        await window.App.settings.save({ updateUrl: 'http://localhost:8766/latest-old.json' });
-        const upd3 = await window.App.updater.check({ dryRun: true });
-        log('   ok:', upd3.ok, 'hasUpdate:', upd3.hasUpdate);
-
-        log('9h. updater check (不正manifest)');
-        await window.App.settings.save({ updateUrl: 'http://localhost:8766/latest-bad.json' });
-        const upd4 = await window.App.updater.check({ dryRun: true });
-        log('   ok:', upd4.ok, 'error:', upd4.error);
 
         log('10. views check — レンダリング可能か');
         const views = ['settings','patient','source','preview','ingest','dicom','done'];

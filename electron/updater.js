@@ -20,10 +20,12 @@
 const { app, dialog, shell, ipcMain, BrowserWindow } = require('electron');
 const https = require('https');
 const http = require('http');
-const settings = require('./settings-handler');
 
 const isMac = process.platform === 'darwin';
 const arch = process.arch; // 'arm64' | 'x64'
+
+// アップデート確認URLは固定（GitHub Releases）。ユーザー設定からは変更不可。
+const UPDATE_URL = 'https://github.com/roon1115/surgery-data-manager/releases/latest/download/latest.json';
 
 function compareSemver(a, b) {
   const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
@@ -81,21 +83,8 @@ async function checkForUpdate({ silent = false, dryRun = false } = {}) {
   //         ただし新版が見つかった場合は通知ダイアログを出す。
   // dryRun: いかなるダイアログも出さない（テスト・プログラマティック呼出し用）。
   if (dryRun) silent = true;
-  const cfg = settings.getAll();
-  const url = cfg.updateUrl;
+  const url = UPDATE_URL;
   const currentVersion = app.getVersion();
-
-  if (!url) {
-    if (!silent) {
-      dialog.showMessageBox({
-        type: 'info',
-        title: 'アップデートURL未設定',
-        message: '設定画面で「アップデート確認URL」を指定してください。',
-        detail: 'latest.json を配信するURLが必要です（Dropbox公開リンク、GitHub Releasesなど）。',
-      });
-    }
-    return { ok: false, error: 'update URL not configured' };
-  }
 
   let manifest;
   try {
@@ -186,13 +175,10 @@ ipcMain.handle('updater:check', async (_e, args = {}) => {
   return await checkForUpdate({ silent: !!args.silent, dryRun: !!args.dryRun });
 });
 
-// 起動時にサイレントチェック（URLが設定されていれば）
+// 起動時にサイレントチェック
 function scheduleStartupCheck() {
   setTimeout(() => {
-    const cfg = settings.getAll();
-    if (cfg.updateUrl) {
-      checkForUpdate({ silent: false }).catch(() => {});
-    }
+    checkForUpdate({ silent: false }).catch(() => {});
   }, 5000); // 起動5秒後
 }
 

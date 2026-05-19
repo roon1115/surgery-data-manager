@@ -15,7 +15,6 @@ const store = new Store({
       transferSyntax: '1.2.840.10008.1.2',
     },
     folderPattern: '{date}_{id}_{name}_{procedure}',
-    updateUrl: 'https://github.com/roon1115/surgery-data-manager/releases/latest/download/latest.json',
     typeFolders: {
       anesthesia: '麻酔記録',
       surgicalPhoto: '手術写真',
@@ -42,7 +41,6 @@ function getAll() {
     outputRoot: store.get('outputRoot'),
     dicom: store.get('dicom'),
     folderPattern: store.get('folderPattern'),
-    updateUrl: store.get('updateUrl'),
     typeFolders,
   };
 }
@@ -56,7 +54,6 @@ ipcMain.handle('settings:save', async (_e, partial = {}) => {
     store.set('dicom', { ...cur, ...partial.dicom });
   }
   if (typeof partial.folderPattern === 'string') store.set('folderPattern', partial.folderPattern);
-  if (typeof partial.updateUrl === 'string') store.set('updateUrl', partial.updateUrl);
   if (partial.typeFolders && typeof partial.typeFolders === 'object') {
     const cur = store.get('typeFolders') || {};
     store.set('typeFolders', { ...DEFAULT_TYPE_FOLDERS, ...cur, ...partial.typeFolders });

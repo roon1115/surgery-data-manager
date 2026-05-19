@@ -45,17 +45,10 @@ window.Views.settings = (function() {
     const rBronchoscope = makeTypeFolderRow('bronchoscope', '気管支鏡');
     const rEndoscope = makeTypeFolderRow('endoscope', '内視鏡');
 
-    const elUpdateUrl = el('input', {
-      type: 'text',
-      value: cfg.updateUrl || '',
-      placeholder: 'https://.../latest.json（DropboxやGitHub Releasesに置く）',
-    });
     const updateStatus = el('span', { style: { marginLeft: '8px', color: 'var(--fg-mute)' } }, '');
     const updateCheckBtn = el('button', { class: 'ghost', onclick: async () => {
       updateStatus.textContent = '確認中...';
       updateStatus.style.color = 'var(--fg-mute)';
-      // 保存してから確認
-      await window.App.settings.save({ updateUrl: elUpdateUrl.value.trim() });
       const r = await window.App.updater.check({ silent: false });
       if (!r.ok) {
         updateStatus.textContent = '✗ ' + (r.error || '失敗');
@@ -100,7 +93,6 @@ window.Views.settings = (function() {
           modality: elModality.value.trim() || 'OT',
           transferSyntax: elTs.value,
         },
-        updateUrl: elUpdateUrl.value.trim(),
         typeFolders: {
           anesthesia: rAnesthesia.input.value.trim(),
           surgicalPhoto: rSurgicalPhoto.input.value.trim(),
@@ -166,12 +158,8 @@ window.Views.settings = (function() {
       })(),
 
       el('h3', null, '自動アップデート'),
-      el('label', { class: 'field' },
-        el('span', { class: 'label' }, 'latest.json の配信URL（任意）'),
-        elUpdateUrl,
-        el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginTop: '2px' } },
-          'Dropbox公開リンク、GitHub Releases、その他HTTP/HTTPSで公開可能なJSONファイルのURLを指定。設定すると起動時に新版を自動チェックします。'),
-      ),
+      el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginBottom: '6px' } },
+        '起動時に GitHub Releases から最新版を自動確認します。新版があれば通知ダイアログが表示されます。'),
       el('div', { class: 'row', style: { alignItems: 'center' } },
         updateCheckBtn,
         updateStatus,
