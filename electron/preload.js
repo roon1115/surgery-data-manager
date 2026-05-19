@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('App', {
     get: () => ipcRenderer.invoke('settings:get'),
     save: (partial) => ipcRenderer.invoke('settings:save', partial),
     chooseOutputRoot: () => ipcRenderer.invoke('settings:chooseOutputRoot'),
+    chooseTypeFolder: (type) => ipcRenderer.invoke('settings:chooseTypeFolder', { type }),
   },
 
   ingest: {

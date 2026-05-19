@@ -77,4 +77,35 @@ ipcMain.handle('settings:chooseOutputRoot', async () => {
   return { ok: true, path: chosen };
 });
 
+const TYPE_LABELS = {
+  anesthesia: '麻酔モニター記録',
+  surgicalPhoto: '手術写真',
+  laparoscope: '腹腔鏡',
+  bronchoscope: '気管支鏡',
+  endoscope: '内視鏡',
+};
+
+ipcMain.handle('settings:chooseTypeFolder', async (_e, args = {}) => {
+  const { type } = args;
+  if (!type || !TYPE_LABELS[type]) return { ok: false, error: 'invalid type' };
+  const win = BrowserWindow.getFocusedWindow();
+  const tf = store.get('typeFolders') || {};
+  const currentValue = tf[type] || '';
+  const outputRoot = store.get('outputRoot') || '';
+  // 既存値が絶対パスならその親、なければ outputRoot、それもなければ /Volumes
+  let defaultPath = '/Volumes';
+  if (currentValue && currentValue.startsWith('/')) defaultPath = currentValue;
+  else if (outputRoot) defaultPath = outputRoot;
+  const result = await dialog.showOpenDialog(win, {
+    title: `「${TYPE_LABELS[type]}」の保存先フォルダを選択`,
+    properties: ['openDirectory', 'createDirectory'],
+    defaultPath,
+  });
+  if (result.canceled || !result.filePaths[0]) return { ok: false };
+  const chosen = result.filePaths[0];
+  const newTf = { ...DEFAULT_TYPE_FOLDERS, ...(store.get('typeFolders') || {}), [type]: chosen };
+  store.set('typeFolders', newTf);
+  return { ok: true, path: chosen };
+});
+
 module.exports = { getAll };

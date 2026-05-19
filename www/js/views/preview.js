@@ -34,7 +34,22 @@ window.Views.preview = (function() {
       .replace('{id}', sanitize(state.patient?.id))
       .replace('{name}', sanitize(state.patient?.name))
       .replace('{procedure}', sanitize(state.patient?.procedure));
-    const patientFolderPath = (cfg.outputRoot || '') + '/' + folderName;
+
+    // 種別フォルダの解決（ingest-handler の resolveTypeFolderRoot と同じロジック）
+    const defaults = {
+      anesthesia: '麻酔記録', surgicalPhoto: '手術写真',
+      laparoscope: '腹腔鏡', bronchoscope: '気管支鏡', endoscope: '内視鏡',
+    };
+    function resolveTypeFolderRoot(type) {
+      const v = (typeFolders[type] || '').trim();
+      if (v && v.startsWith('/')) return v;
+      const root = cfg.outputRoot || '';
+      if (v) return root + '/' + v;
+      return root + '/' + (defaults[type] || type);
+    }
+    function targetPathFor(type) {
+      return resolveTypeFolderRoot(type) + '/' + folderName;
+    }
 
     // サマリ計算関数
     function computeSummary() {
@@ -83,7 +98,7 @@ window.Views.preview = (function() {
             `⚠ ソース「${src.name}」は種別が未設定のため、コピー対象外です。`));
           return;
         }
-        const subfolder = typeFolders[src.type] || src.type;
+        const destPath = targetPathFor(src.type);
         const selectedCount = src.files.filter(f => f.selected).length;
         const totalCount = src.files.length;
         const selectedBytes = src.files.filter(f => f.selected).reduce((a, b) => a + (b.size || 0), 0);
@@ -155,7 +170,7 @@ window.Views.preview = (function() {
           el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)', margin: '8px 0' } },
             '保存先: ',
             el('span', { class: 'preview', style: { display: 'inline-block', padding: '2px 6px' } },
-              `${patientFolderPath}/${subfolder}/`),
+              `${destPath}/`),
           ),
           el('div', { class: 'row', style: { alignItems: 'center', marginBottom: '8px' } },
             el('div', { style: { flex: '1', fontSize: '12px' } },
@@ -182,13 +197,26 @@ window.Views.preview = (function() {
       state.goto('ingest');
     }}, 'コピー開始 →');
 
+    // 使用される種別の保存先一覧
+    const usedTypes = [...new Set(state.sources.filter(s => s.type).map(s => s.type))];
+    const destSummary = usedTypes.map(t => {
+      const label = ({
+        anesthesia: '麻酔モニター記録', surgicalPhoto: '手術写真',
+        laparoscope: '腹腔鏡', bronchoscope: '気管支鏡', endoscope: '内視鏡',
+      })[t] || t;
+      return el('div', { style: { fontSize: '12px', marginBottom: '4px' } },
+        el('span', { style: { color: 'var(--fg-mute)', marginRight: '8px' } }, label + ':'),
+        el('span', { class: 'preview', style: { display: 'inline-block', padding: '2px 6px' } },
+          targetPathFor(t) + '/'));
+    });
+
     const root = el('div', null,
       el('div', { class: 'card' },
         el('h2', null, 'コピー内容プレビュー'),
         el('div', { class: 'banner ok' },
-          '出力先（患者フォルダ）: ',
-          el('span', { class: 'preview', style: { display: 'inline-block', padding: '2px 6px' } },
-            patientFolderPath),
+          el('div', { style: { marginBottom: '4px', fontWeight: '600' } }, '患者フォルダ名: ' + folderName),
+          el('div', { style: { marginTop: '8px' } }, '種別ごとの保存先:'),
+          ...destSummary,
         ),
         el('h3', null, 'サマリ'),
         summaryEl,

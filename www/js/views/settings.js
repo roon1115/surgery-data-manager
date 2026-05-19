@@ -25,13 +25,25 @@ window.Views.settings = (function() {
     );
     elTs.value = cfg.dicom.transferSyntax || '1.2.840.10008.1.2';
 
-    // 5種別の保存先サブフォルダ名入力
+    // 5種別の保存先フォルダ（絶対パス推奨、相対なら outputRoot 配下として解決）
     const tf = cfg.typeFolders || {};
-    const elTfAnesthesia = el('input', { type: 'text', value: tf.anesthesia || '麻酔記録', placeholder: '麻酔記録' });
-    const elTfSurgicalPhoto = el('input', { type: 'text', value: tf.surgicalPhoto || '手術写真', placeholder: '手術写真' });
-    const elTfLaparoscope = el('input', { type: 'text', value: tf.laparoscope || '腹腔鏡', placeholder: '腹腔鏡' });
-    const elTfBronchoscope = el('input', { type: 'text', value: tf.bronchoscope || '気管支鏡', placeholder: '気管支鏡' });
-    const elTfEndoscope = el('input', { type: 'text', value: tf.endoscope || '内視鏡', placeholder: '内視鏡' });
+    const makeTypeFolderRow = (typeKey, defaultValue) => {
+      const input = el('input', {
+        type: 'text',
+        value: tf[typeKey] || '',
+        placeholder: `絶対パス推奨（例: /Volumes/Stella_8TB/${defaultValue}）。空欄なら出力ルート/${defaultValue}`,
+      });
+      const browseBtn = el('button', { class: 'ghost', onclick: async () => {
+        const r = await window.App.settings.chooseTypeFolder(typeKey);
+        if (r.ok) input.value = r.path;
+      }}, '選択...');
+      return { input, browseBtn };
+    };
+    const rAnesthesia = makeTypeFolderRow('anesthesia', '麻酔記録');
+    const rSurgicalPhoto = makeTypeFolderRow('surgicalPhoto', '手術写真');
+    const rLaparoscope = makeTypeFolderRow('laparoscope', '腹腔鏡');
+    const rBronchoscope = makeTypeFolderRow('bronchoscope', '気管支鏡');
+    const rEndoscope = makeTypeFolderRow('endoscope', '内視鏡');
 
     const elUpdateUrl = el('input', {
       type: 'text',
@@ -90,11 +102,11 @@ window.Views.settings = (function() {
         },
         updateUrl: elUpdateUrl.value.trim(),
         typeFolders: {
-          anesthesia: elTfAnesthesia.value.trim() || '麻酔記録',
-          surgicalPhoto: elTfSurgicalPhoto.value.trim() || '手術写真',
-          laparoscope: elTfLaparoscope.value.trim() || '腹腔鏡',
-          bronchoscope: elTfBronchoscope.value.trim() || '気管支鏡',
-          endoscope: elTfEndoscope.value.trim() || '内視鏡',
+          anesthesia: rAnesthesia.input.value.trim(),
+          surgicalPhoto: rSurgicalPhoto.input.value.trim(),
+          laparoscope: rLaparoscope.input.value.trim(),
+          bronchoscope: rBronchoscope.input.value.trim(),
+          endoscope: rEndoscope.input.value.trim(),
         },
       };
       await window.App.settings.save(partial);
@@ -130,18 +142,28 @@ window.Views.settings = (function() {
         echoBtn,
         echoStatus,
       ),
-      el('h3', null, '種別ごとの保存先サブフォルダ'),
+      el('h3', null, '種別ごとの保存先フォルダ'),
       el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginBottom: '6px' } },
-        '患者フォルダ配下に作成されるサブフォルダ名。空欄にすると既定値が使われます。'),
-      el('div', { class: 'row' },
-        el('label', { class: 'field' }, el('span', { class: 'label' }, '麻酔モニター記録'), elTfAnesthesia),
-        el('label', { class: 'field' }, el('span', { class: 'label' }, '手術写真（DICOM送信対象）'), elTfSurgicalPhoto),
-      ),
-      el('div', { class: 'row' },
-        el('label', { class: 'field' }, el('span', { class: 'label' }, '腹腔鏡'), elTfLaparoscope),
-        el('label', { class: 'field' }, el('span', { class: 'label' }, '気管支鏡'), elTfBronchoscope),
-        el('label', { class: 'field' }, el('span', { class: 'label' }, '内視鏡'), elTfEndoscope),
-      ),
+        '各種別のデータは指定フォルダ配下に「患者フォルダ」を作って収納されます（例: 手術写真/2026-05-19_P0001_モモ_去勢術/）。',
+        el('br'),
+        '絶対パス推奨。空欄や相対パスにすると「出力ルート」配下として解決されます。'),
+      (function() {
+        const makeRow = (label, row, hint) => el('label', { class: 'field' },
+          el('span', { class: 'label' }, label),
+          el('div', { class: 'row' },
+            el('div', { style: { flex: '4' } }, row.input),
+            el('div', { style: { flex: '1' } }, row.browseBtn),
+          ),
+          hint ? el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginTop: '2px' } }, hint) : null,
+        );
+        return el('div', null,
+          makeRow('麻酔モニター記録', rAnesthesia),
+          makeRow('手術写真（DICOM送信対象）', rSurgicalPhoto),
+          makeRow('腹腔鏡', rLaparoscope),
+          makeRow('気管支鏡', rBronchoscope),
+          makeRow('内視鏡', rEndoscope),
+        );
+      })(),
 
       el('h3', null, '自動アップデート'),
       el('label', { class: 'field' },

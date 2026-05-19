@@ -109,37 +109,80 @@ function buildFolderName(pattern, patient, dateIso) {
     .replace('{procedure}', safe(patient.procedure));
 }
 
+// 種別フォルダの解決:
+//   - 絶対パス (/...) ならそのまま使う
+//   - 相対パスなら outputRoot 配下として解決（後方互換）
+//   - 空なら outputRoot/{type-default-name} にフォールバック
+function resolveTypeFolderRoot(type, cfg) {
+  const tf = (cfg.typeFolders || {})[type] || '';
+  const defaults = {
+    anesthesia: '麻酔記録', surgicalPhoto: '手術写真',
+    laparoscope: '腹腔鏡', bronchoscope: '気管支鏡', endoscope: '内視鏡',
+  };
+  if (tf && tf.startsWith('/')) return tf;
+  const root = cfg.outputRoot || '';
+  if (tf) return path.join(root, tf);
+  return path.join(root, defaults[type] || type);
+}
+
 ipcMain.handle('ingest:prepareTarget', async (_e, args = {}) => {
   const cfg = settings.getAll();
-  const root = cfg.outputRoot;
-  if (!root) return { ok: false, error: '出力ルートが未設定です' };
+  const usedTypes = Array.isArray(args.types) && args.types.length > 0
+    ? args.types
+    : Object.keys(cfg.typeFolders || {});
 
-  const exists = fs.existsSync(root);
-  if (!exists) return { ok: false, error: `出力ルートが見つかりません: ${root}（NASがマウントされているか確認してください）` };
+  // 使用予定の各種別フォルダの存在チェック
+  const missing = [];
+  for (const t of usedTypes) {
+    const root = resolveTypeFolderRoot(t, cfg);
+    if (!root) { missing.push({ type: t, reason: '未設定' }); continue; }
+    if (!fs.existsSync(root)) missing.push({ type: t, reason: `見つかりません: ${root}` });
+  }
+  if (missing.length > 0) {
+    return { ok: false, error: '保存先フォルダの確認が必要です: ' + missing.map(m => `${m.type}(${m.reason})`).join(', ') };
+  }
 
   const folderName = buildFolderName(cfg.folderPattern, args.patient || {}, args.date);
-  let target = path.join(root, folderName);
-  let collision = false;
-  if (fs.existsSync(target)) {
-    collision = true;
-    if (args.onCollision === 'rename') {
-      let n = 2;
-      while (fs.existsSync(`${target}_${n}`)) n++;
-      target = `${target}_${n}`;
-    } else if (args.onCollision === 'abort') {
-      return { ok: false, error: '同名フォルダが既に存在します', collision: true, target };
+
+  // 各種別フォルダ配下に患者フォルダがすでにあるか確認 → 衝突検出
+  const collisions = {};
+  for (const t of usedTypes) {
+    const root = resolveTypeFolderRoot(t, cfg);
+    let target = path.join(root, folderName);
+    if (fs.existsSync(target)) {
+      if (args.onCollision === 'rename') {
+        let n = 2;
+        while (fs.existsSync(`${target}_${n}`)) n++;
+        target = `${target}_${n}`;
+        collisions[t] = { renamed: true, target };
+      } else if (args.onCollision === 'abort') {
+        return { ok: false, error: '同名フォルダが既に存在します', collision: true, type: t, target };
+      } else {
+        collisions[t] = { existing: true, target };
+      }
     }
   }
 
-  try {
-    fs.mkdirSync(target, { recursive: true });
-    // 種別別サブフォルダは ingest 開始時に必要なものだけ作成する。
-    // ここでは患者ルートだけ確実に作る。
-  } catch (e) {
-    return { ok: false, error: String(e?.message || e) };
+  // 患者フォルダを各種別フォルダ配下に作成
+  const targets = {};
+  for (const t of usedTypes) {
+    const root = resolveTypeFolderRoot(t, cfg);
+    const target = collisions[t]?.target || path.join(root, folderName);
+    try {
+      fs.mkdirSync(target, { recursive: true });
+      targets[t] = target;
+    } catch (e) {
+      return { ok: false, error: `${t} の患者フォルダ作成失敗: ${e?.message || e}` };
+    }
   }
 
-  return { ok: true, target, collision, folderName, typeFolders: cfg.typeFolders };
+  return {
+    ok: true,
+    folderName,
+    targets,                // { surgicalPhoto: "/Volumes/NAS/手術写真/2026..." , ... }
+    typeFolders: cfg.typeFolders,
+    collisions: Object.keys(collisions).length > 0 ? collisions : null,
+  };
 });
 
 function hashFile(filePath) {
@@ -164,21 +207,13 @@ function copyStream(src, dst) {
 }
 
 ipcMain.handle('ingest:start', async (_e, args = {}) => {
-  const { target, files, patient, useHashDiff } = args;
-  if (!target || !Array.isArray(files)) return { ok: false, error: 'invalid args' };
-
-  const cfg = settings.getAll();
-  const typeFolders = cfg.typeFolders || {};
-
-  // ファイル単位の type (= 5種別の英語キー) から保存サブフォルダ名を引く
-  const subdirOf = (type) => {
-    if (type && typeFolders[type]) return typeFolders[type];
-    // 旧キーや未指定はフォールバック
-    if (type === 'photo') return typeFolders.surgicalPhoto || '手術写真';
-    if (type === 'video') return typeFolders.surgicalPhoto || '手術写真';
-    if (type === 'csv') return typeFolders.anesthesia || '麻酔記録';
-    return 'other';
-  };
+  // targets: { surgicalPhoto: "/abs/path/...", anesthesia: "/abs/path/...", ... }
+  //   (prepareTarget で計算済の、種別→患者フォルダのフルパス対応表)
+  // 後方互換: target (string) と files が来た場合は旧形式
+  const { targets, files, patient, useHashDiff } = args;
+  if (!targets || typeof targets !== 'object' || !Array.isArray(files)) {
+    return { ok: false, error: 'invalid args (targets, files required)' };
+  }
 
   const planned = files.filter(f => f.selected !== false);
   const totalBytes = planned.reduce((s, f) => s + (f.size || 0), 0);
@@ -217,18 +252,23 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
         }
       }
 
-      // f.type が 5種別(anesthesia/surgicalPhoto/laparoscope/bronchoscope/endoscope)、
-      // 後方互換で f.kind (photo/video/csv) も受ける
-      const subdir = subdirOf(f.type || f.kind || classifyByExt(path.extname(f.path)));
+      // f.type は 5種別(anesthesia/surgicalPhoto/laparoscope/bronchoscope/endoscope)
+      const typeDir = targets[f.type];
+      if (!typeDir) {
+        failed++;
+        failures.push({ file: f.path, error: `種別 ${f.type} の保存先が未指定` });
+        emitProgress({ type: 'file-fail', index: i, name: path.basename(f.path), error: '保存先未指定' });
+        continue;
+      }
       const ext = path.extname(f.path);
       const base = path.basename(f.path, ext);
       let dstName = `${base}${ext}`;
-      let dst = path.join(target, subdir, dstName);
+      let dst = path.join(typeDir, dstName);
       if (fs.existsSync(dst)) {
         let n = 2;
-        while (fs.existsSync(path.join(target, subdir, `${base}_${n}${ext}`))) n++;
+        while (fs.existsSync(path.join(typeDir, `${base}_${n}${ext}`))) n++;
         dstName = `${base}_${n}${ext}`;
-        dst = path.join(target, subdir, dstName);
+        dst = path.join(typeDir, dstName);
       }
       fs.mkdirSync(path.dirname(dst), { recursive: true });
 
@@ -294,7 +334,7 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
     failed,
     failures,
     dicomCandidates,
-    target,
+    targets,
   };
 });
 

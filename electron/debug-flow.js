@@ -25,6 +25,10 @@ async function runChecks(win) {
   fs.writeFileSync(path.join(tmpSrc, 'anesthesia.csv'), 'time,bp,hr\n0,120,80\n');
   fs.writeFileSync(path.join(tmpSrc, 'unknown.xyz'), 'unknown');
 
+  // 種別別フォルダもテスト用に作成
+  fs.mkdirSync(path.join(tmpRoot, '手術写真'), { recursive: true });
+  fs.mkdirSync(path.join(tmpRoot, '麻酔記録'), { recursive: true });
+
   console.log('[debug-flow] tmpRoot=', tmpRoot);
   console.log('[debug-flow] tmpSrc=', tmpSrc);
 
@@ -53,22 +57,22 @@ async function runChecks(win) {
         const scan = await window.App.ingest.scanSource({ sourcePath: tmpSrc });
         log('   ok:', scan.ok, 'files:', scan.files && scan.files.length, 'summary:', JSON.stringify(scan.summary));
 
-        log('4. prepareTarget');
+        log('4. prepareTarget (種別=surgicalPhoto のみ)');
         const patient = { id: 'P0001', name: 'モモ', nameRomaji: 'MOMO', procedure: '去勢術', date: '2026-05-17' };
-        const prep = await window.App.ingest.prepareTarget({ patient, date: patient.date, onCollision: 'rename' });
-        log('   ok:', prep.ok, 'target:', prep.target, 'folderName:', prep.folderName);
+        const prep = await window.App.ingest.prepareTarget({ patient, date: patient.date, onCollision: 'rename', types: ['surgicalPhoto', 'anesthesia'] });
+        log('   ok:', prep.ok, 'error:', prep.error, 'folderName:', prep.folderName, 'targets:', JSON.stringify(prep.targets));
 
-        log('5. ingest.start (no diff)');
-        const filesToCopy = scan.files.map(f => ({ ...f, selected: true, isSurgicalPhoto: f.kind === 'photo' }));
-        const r = await window.App.ingest.start({ target: prep.target, files: filesToCopy, patient, useHashDiff: false });
+        log('5. ingest.start (no diff, 全ファイル surgicalPhoto 扱い)');
+        const filesToCopy = scan.files.map(f => ({ ...f, selected: true, type: 'surgicalPhoto' }));
+        const r = await window.App.ingest.start({ targets: prep.targets, files: filesToCopy, patient, useHashDiff: false });
         log('   ok:', r.ok, 'copied:', r.copied, 'skipped:', r.skippedDup, 'failed:', r.failed, 'dicom:', r.dicomCandidates && r.dicomCandidates.length);
 
         log('6. ingest.start (with diff, 2nd run — should record hashes)');
-        const r2 = await window.App.ingest.start({ target: prep.target, files: filesToCopy, patient, useHashDiff: true });
+        const r2 = await window.App.ingest.start({ targets: prep.targets, files: filesToCopy, patient, useHashDiff: true });
         log('   ok:', r2.ok, 'copied:', r2.copied, 'skipped:', r2.skippedDup, 'failed:', r2.failed);
 
         log('6b. ingest.start (with diff, 3rd run — now all should be skipped)');
-        const r3 = await window.App.ingest.start({ target: prep.target, files: filesToCopy, patient, useHashDiff: true });
+        const r3 = await window.App.ingest.start({ targets: prep.targets, files: filesToCopy, patient, useHashDiff: true });
         log('   ok:', r3.ok, 'copied:', r3.copied, 'skipped:', r3.skippedDup, 'failed:', r3.failed);
 
         log('7. utils.toRomaji');

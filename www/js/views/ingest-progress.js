@@ -3,15 +3,17 @@ window.Views.ingest = (function() {
   const { el, formatBytes } = window.U;
 
   async function prepareTarget(state) {
+    const usedTypes = [...new Set(state.sources.filter(s => s.type).map(s => s.type))];
     const r = await window.App.ingest.prepareTarget({
       patient: state.patient,
       date: state.patient.date,
       onCollision: state.onCollision || 'keep',
+      types: usedTypes,
     });
     if (!r.ok && r.collision) {
       return new Promise((resolve) => {
         const body = el('div', null,
-          el('p', null, '同名フォルダが既に存在します：'),
+          el('p', null, `「${r.type}」の保存先に同名フォルダが既に存在します：`),
           el('div', { class: 'preview' }, r.target),
           el('p', null, 'どうしますか？'),
         );
@@ -41,6 +43,7 @@ window.Views.ingest = (function() {
             patient: state.patient,
             date: state.patient.date,
             onCollision: 'keep',
+            types: usedTypes,
           });
           resolve(r2);
         };
@@ -50,6 +53,7 @@ window.Views.ingest = (function() {
             patient: state.patient,
             date: state.patient.date,
             onCollision: 'rename',
+            types: usedTypes,
           });
           resolve(r2);
         };
@@ -118,8 +122,13 @@ window.Views.ingest = (function() {
       cancelBtn.onclick = () => state.goto('source');
       return;
     }
-    state.targetFolder = prep.target;
-    logLine('出力先: ' + prep.target, 'ok');
+    state.targets = prep.targets || {};
+    // 表示用: 最初の種別の patient folder を代表として保持
+    const firstType = Object.keys(state.targets)[0];
+    state.targetFolder = firstType ? state.targets[firstType] : null;
+    for (const [t, p] of Object.entries(state.targets)) {
+      logLine(`出力先 [${t}]: ${p}`, 'ok');
+    }
 
     // 2. ファイル一覧の集約
     // プレビュー画面で f.selected = true のものだけが対象。
@@ -165,10 +174,10 @@ window.Views.ingest = (function() {
       }
     });
 
-    // 4. 単一プロセスで全ソースをまとめて取り込む（差分判定は各ソースの useHashDiff を尊重）
+    // 4. 単一プロセスで全ソースをまとめて取り込む（差分判定は各ファイルの useHashDiff を尊重）
     const useHashDiff = state.sources.some(s => s.useHashDiff);
     const result = await window.App.ingest.start({
-      target: prep.target,
+      targets: state.targets,
       files: allFiles,
       patient: state.patient,
       useHashDiff,

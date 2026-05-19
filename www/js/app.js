@@ -25,6 +25,7 @@
       state.patient = null;
       state.sources = [];
       state.targetFolder = null;
+      state.targets = null;
       state.ingestResult = null;
       state.dicomResult = null;
     },
