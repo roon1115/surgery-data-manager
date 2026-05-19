@@ -1,6 +1,6 @@
 {
   "name": "surgery-data-manager",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "手術データ管理アプリ — 記録媒体からの差分インポートとDICOM送信",
   "main": "electron/main.js",
   "private": true,
@@ -39,6 +39,12 @@
       "electron/**/*",
       "www/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "docs/manual.pdf",
+        "to": "manual.pdf"
+      }
     ],
     "mac": {
       "category": "public.app-category.medical",

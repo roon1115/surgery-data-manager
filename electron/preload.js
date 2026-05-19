@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('App', {
 
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   showFolder: (path) => ipcRenderer.invoke('app:showFolder', path),
+  openManual: () => ipcRenderer.invoke('app:openManual'),
 
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),

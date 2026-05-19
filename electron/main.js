@@ -7,6 +7,7 @@ require('./ingest-handler');
 require('./dicom-handler');
 require('./updater');
 require('./debug-flow');
+require('./screenshot-mode');
 
 const isMac = process.platform === 'darwin';
 let mainWindow = null;
@@ -87,6 +88,42 @@ ipcMain.handle('app:showFolder', async (_e, folderPath) => {
   return { ok: true };
 });
 
+function resolveManualPath() {
+  // パッケージ済: <app>/Contents/Resources/manual.pdf
+  // 開発時: <project>/docs/manual.pdf
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'manual.pdf');
+  }
+  return path.join(__dirname, '..', 'docs', 'manual.pdf');
+}
+
+async function openManual() {
+  const p = resolveManualPath();
+  const fs = require('fs');
+  if (!fs.existsSync(p)) {
+    dialog.showMessageBox({
+      type: 'error',
+      title: 'マニュアルが見つかりません',
+      message: 'manual.pdf がパッケージに含まれていません。',
+      detail: p,
+    });
+    return { ok: false, error: 'not found', path: p };
+  }
+  const err = await shell.openPath(p);
+  if (err) {
+    dialog.showMessageBox({
+      type: 'error',
+      title: 'マニュアルを開けませんでした',
+      message: err,
+      detail: p,
+    });
+    return { ok: false, error: err };
+  }
+  return { ok: true };
+}
+
+ipcMain.handle('app:openManual', async () => openManual());
+
 function buildMenu() {
   const updater = require('./updater');
   const template = [
@@ -138,6 +175,15 @@ function buildMenu() {
       submenu: [
         { role: 'minimize' }, { role: 'zoom' },
         ...(isMac ? [{ type: 'separator' }, { role: 'front' }] : [{ role: 'close' }]),
+      ],
+    },
+    {
+      role: 'help',
+      label: 'ヘルプ',
+      submenu: [
+        { label: 'マニュアルを開く (PDF)', accelerator: 'F1', click: () => openManual() },
+        { type: 'separator' },
+        { label: 'GitHub リリースページ', click: () => shell.openExternal('https://github.com/roon1115/surgery-data-manager/releases') },
       ],
     },
   ];

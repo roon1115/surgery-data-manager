@@ -157,6 +157,12 @@ window.Views.settings = (function() {
         );
       })(),
 
+      el('h3', null, 'ヘルプ'),
+      el('div', { class: 'row', style: { alignItems: 'center', marginBottom: '10px' } },
+        el('button', { class: 'ghost', onclick: () => window.App.openManual() }, '📖 マニュアルを開く (PDF)'),
+        el('span', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginLeft: '8px' } },
+          'メニューバー「ヘルプ」または F1 キーからも開けます'),
+      ),
       el('h3', null, '自動アップデート'),
       el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginBottom: '6px' } },
         '起動時に GitHub Releases から最新版を自動確認します。新版があれば通知ダイアログが表示されます。'),
