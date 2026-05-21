@@ -182,6 +182,13 @@ button.danger {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 16px;
+  /* 常に画面下部に固定して、長いリストの下でもボタンが見えるように */
+  position: sticky;
+  bottom: 0;
+  background: var(--card);
+  padding: 12px 0 4px 0;
+  border-top: 1px solid var(--border);
+  z-index: 10;
 }
 .actions.between { justify-content: space-between; }
 

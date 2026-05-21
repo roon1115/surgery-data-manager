@@ -162,8 +162,12 @@ ipcMain.handle('dicom:sendStudy', async (_e, args = {}) => {
 
   const patient = args.patient || {};
   const exam = args.exam || {};
-  const studyUID = generateUID();
-  const seriesUID = generateUID();
+  // バッチ送信に対応: 呼出側から studyUID/seriesUID/startInstanceNumber を渡すことで
+  // 同じ Study に追加できる。指定なしなら新規生成（後方互換）。
+  const studyUID = args.studyUID || generateUID();
+  const seriesUID = args.seriesUID || generateUID();
+  const startInstance = Number.isInteger(args.startInstanceNumber) && args.startInstanceNumber > 0
+    ? args.startInstanceNumber : 1;
 
   let datasets;
   try {
@@ -171,17 +175,18 @@ ipcMain.handle('dicom:sendStudy', async (_e, args = {}) => {
       patient, exam, studyUID, seriesUID,
       sopUID: generateUID(),
       modality, charset,
-      instanceNumber: i + 1,
+      instanceNumber: startInstance + i,
       width: img.width,
       height: img.height,
       rgb: new Uint8Array(img.rgb),
       transferSyntax,
     }));
   } catch (e) {
-    return { ok: false, error: `dataset構築失敗: ${e?.message || e}` };
+    return { ok: false, error: `dataset構築失敗: ${e?.message || e}`, studyUID, seriesUID };
   }
 
-  return await runClient((client, settle) => {
+  // バッチごとに新規 association を張る。Study/Series UID は呼出側で固定される。
+  const result = await runClient((client, settle) => {
     const { requests, constants } = dimse;
     let sent = 0;
     let lastError = null;
@@ -202,7 +207,10 @@ ipcMain.handle('dicom:sendStudy', async (_e, args = {}) => {
     });
 
     client.send(host, port, callingAet, calledAet);
-  });
+  }, 60000); // 大量送信向けにタイムアウトを 60秒 に拡張
+
+  // 呼出側がバッチ送信を続けられるよう、生成済 UID を必ず返す
+  return { ...result, studyUID, seriesUID };
 });
 
 ipcMain.handle('dicom:queueFailure', async (_e, args = {}) => {
