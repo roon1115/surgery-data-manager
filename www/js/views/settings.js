@@ -9,9 +9,7 @@ window.Views.settings = (function() {
     const elOutputRoot = el('input', { type: 'text', value: cfg.outputRoot || '', placeholder: '/Volumes/Stella_8TB/...' });
     const elBrowse = el('button', { class: 'ghost', onclick: async () => {
       const r = await window.App.settings.chooseOutputRoot();
-      if (r.ok) {
-        elOutputRoot.value = r.path;
-      }
+      if (r.ok) elOutputRoot.value = r.path;
     }}, 'フォルダを選択');
 
     const elAet = el('input', { type: 'text', value: cfg.dicom.callingAet || '', placeholder: 'SURGERY' });
@@ -25,7 +23,7 @@ window.Views.settings = (function() {
     );
     elTs.value = cfg.dicom.transferSyntax || '1.2.840.10008.1.2';
 
-    // 5種別の保存先フォルダ（絶対パス推奨、相対なら outputRoot 配下として解決）
+    // 5種別の保存先フォルダ
     const tf = cfg.typeFolders || {};
     const makeTypeFolderRow = (typeKey, defaultValue) => {
       const input = el('input', {
@@ -66,7 +64,6 @@ window.Views.settings = (function() {
     const echoBtn = el('button', { class: 'ghost', onclick: async () => {
       echoStatus.textContent = '通信中...';
       echoStatus.style.color = 'var(--fg-mute)';
-      // 入力中の値で疎通テスト
       const r = await window.App.dicom.echo({
         callingAet: elAet.value.trim(),
         calledAet: elCalledAet.value.trim(),
@@ -106,8 +103,76 @@ window.Views.settings = (function() {
       state.goto('patient');
     };
 
+    // 編集ロック対象の input/select 一覧（フォルダ選択ボタンや C-ECHO/アプデ確認は除外）
+    const editableEls = [
+      elOutputRoot, elBrowse,
+      elAet, elCalledAet, elHost, elPort, elModality, elTs,
+      rAnesthesia.input, rAnesthesia.browseBtn,
+      rSurgicalPhoto.input, rSurgicalPhoto.browseBtn,
+      rLaparoscope.input, rLaparoscope.browseBtn,
+      rBronchoscope.input, rBronchoscope.browseBtn,
+      rEndoscope.input, rEndoscope.browseBtn,
+    ];
+
+    // 既定はロック状態
+    let unlocked = false;
+    const saveBtn = el('button', { class: 'primary', onclick: onSave, disabled: true }, '保存して次へ');
+    const skipBtn = el('button', { class: 'ghost', onclick: () => state.goto('patient') }, '変更せず次へ →');
+
+    function applyLock() {
+      for (const e of editableEls) {
+        if (e.tagName === 'BUTTON') {
+          e.disabled = !unlocked;
+        } else {
+          e.disabled = !unlocked;
+          e.style.opacity = unlocked ? '' : '0.6';
+        }
+      }
+      saveBtn.disabled = !unlocked;
+      unlockBtn.textContent = unlocked ? '🔓 編集モード中（クリックでロック）' : '🔒 編集する...';
+      unlockBtn.className = unlocked ? 'danger' : 'primary';
+      lockBanner.className = unlocked ? 'banner warn' : 'banner';
+      lockBanner.textContent = unlocked
+        ? '⚠ 編集モード中です。各項目は変更可能になっています。'
+        : '🔒 設定はロックされています。誤って変更されるのを防いでいます。変更が必要な場合は「編集する」を押してください。';
+    }
+
+    const unlockBtn = el('button', null, '');
+    const lockBanner = el('div', null, '');
+    unlockBtn.onclick = () => {
+      if (!unlocked) {
+        // ロック解除前に警告
+        U.modal({
+          title: '⚠ 設定を変更しますか？',
+          body: el('div', null,
+            el('p', null, '設定を変更すると、以下に影響します:'),
+            el('ul', { style: { paddingLeft: '20px', fontSize: '13px', lineHeight: '1.6' } },
+              el('li', null, 'データの保存先パスが変わる → 新規取込分は新しい場所に作られる'),
+              el('li', null, 'DICOM 接続先が変わる → 別の PACS に送信される'),
+              el('li', null, '取り込み履歴 (差分判定 / 過去患者呼び出し) は引き継がれる'),
+            ),
+            el('p', { style: { marginTop: '12px', fontWeight: '600' } }, '本当に編集モードを有効にしますか？'),
+          ),
+          okText: 'はい、編集する',
+          cancelText: 'キャンセル',
+          onOk: () => {
+            unlocked = true;
+            applyLock();
+          },
+        });
+      } else {
+        // すでに編集モード中ならロック（保存せずキャンセル）
+        unlocked = false;
+        applyLock();
+      }
+    };
+
     const root = el('div', { class: 'card' },
       el('h2', null, '設定'),
+      lockBanner,
+      el('div', { class: 'actions', style: { marginTop: 0, marginBottom: '12px', borderBottom: 'none', borderTop: 'none', position: 'static', padding: 0 } },
+        unlockBtn,
+      ),
       el('h3', null, '出力ルート（ネットワークHDD/NAS）'),
       el('div', { class: 'row' },
         el('div', { style: { flex: '4' } }, elOutputRoot),
@@ -136,7 +201,7 @@ window.Views.settings = (function() {
       ),
       el('h3', null, '種別ごとの保存先フォルダ'),
       el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginBottom: '6px' } },
-        '各種別のデータは指定フォルダ配下に「患者フォルダ」を作って収納されます（例: 手術写真/2026-05-19_P0001_モモ_去勢術/）。',
+        '各種別のデータは指定フォルダ配下に「患者フォルダ」を作って収納されます（例: 手術写真/2026-05-22_P0001_モモ_去勢術/）。',
         el('br'),
         '絶対パス推奨。空欄や相対パスにすると「出力ルート」配下として解決されます。'),
       (function() {
@@ -164,12 +229,14 @@ window.Views.settings = (function() {
         updateCheckBtn,
         updateStatus,
       ),
-      el('div', { class: 'actions' },
-        el('button', { class: 'primary', onclick: onSave }, '保存して次へ'),
+      el('div', { class: 'actions between' },
+        skipBtn,
+        saveBtn,
       ),
     );
 
     mount.replaceChildren(root);
+    applyLock(); // 初期化
   }
 
   return { render };
