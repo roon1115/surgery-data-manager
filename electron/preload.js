@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('App', {
     scanSource: (args) => ipcRenderer.invoke('ingest:scanSource', args),
     prepareTarget: (args) => ipcRenderer.invoke('ingest:prepareTarget', args),
     start: (args) => ipcRenderer.invoke('ingest:start', args),
+    cancel: () => ipcRenderer.invoke('ingest:cancel'),
     ejectVolume: (volumePath) => ipcRenderer.invoke('ingest:ejectVolume', { volumePath }),
     checkDuplicates: (files) => ipcRenderer.invoke('ingest:checkDuplicates', { files }),
     onProgress: (cb) => {

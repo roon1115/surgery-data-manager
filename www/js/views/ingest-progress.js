@@ -95,9 +95,16 @@ window.Views.ingest = (function() {
       elLog.scrollTop = elLog.scrollHeight;
     }
 
-    const cancelBtn = el('button', { class: 'ghost', disabled: true }, '中断（未実装）');
+    const cancelBtn = el('button', { class: 'danger' }, '中断');
     const nextBtn = el('button', { class: 'primary', disabled: true }, '次へ：DICOM送信 →');
     const skipDicomBtn = el('button', { class: 'ghost', disabled: true }, 'DICOMをスキップして完了');
+
+    cancelBtn.onclick = async () => {
+      if (!confirm('現在のコピーを中断しますか？\n進行中のファイルは削除されます。これまでコピー済みのファイルは残ります。')) return;
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = '中断中...';
+      await window.App.ingest.cancel();
+    };
 
     const root = el('div', { class: 'card' },
       el('h2', null, 'コピー進捗'),
@@ -172,8 +179,13 @@ window.Views.ingest = (function() {
         logLine('✗ ' + data.name + ' — ' + data.error, 'err');
         document.getElementById('st-fail').textContent = String((parseInt(document.getElementById('st-fail').textContent, 10) || 0) + 1);
       } else if (data.type === 'done') {
-        elStatus.textContent = `完了: コピー ${data.copied} / スキップ ${data.skippedDup} / 失敗 ${data.failed}`;
-        elProgress.firstElementChild.style.width = '100%';
+        if (data.cancelled) {
+          elStatus.textContent = `中断しました: コピー済 ${data.copied} / スキップ ${data.skippedDup} / 失敗 ${data.failed}`;
+          logLine('ユーザー操作により中断されました', 'warn');
+        } else {
+          elStatus.textContent = `完了: コピー ${data.copied} / スキップ ${data.skippedDup} / 失敗 ${data.failed}`;
+          elProgress.firstElementChild.style.width = '100%';
+        }
       }
     });
 
@@ -196,6 +208,13 @@ window.Views.ingest = (function() {
         logLine('  - ' + f.file + ': ' + f.error, 'err');
       }
     }
+
+    // 中断後は「中断」ボタンを「戻る」に変更
+    cancelBtn.classList.remove('danger');
+    cancelBtn.classList.add('ghost');
+    cancelBtn.textContent = result.cancelled ? '← プレビューへ戻る' : '中断';
+    cancelBtn.disabled = !result.cancelled;
+    cancelBtn.onclick = () => state.goto('preview');
 
     const hasDicom = (result.dicomCandidates || []).length > 0;
     nextBtn.disabled = !hasDicom;

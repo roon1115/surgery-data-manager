@@ -197,7 +197,21 @@ window.Views.patient = (function() {
       ),
       el('div', { class: 'actions between' },
         el('button', { class: 'ghost', onclick: () => state.goto('settings') }, '← 設定へ'),
-        el('button', { class: 'primary', onclick: onNext, disabled: !cfg.outputRoot }, '次へ：取り込み元選択 →'),
+        el('div', null,
+          el('button', { class: 'ghost', onclick: () => {
+            elId.value = '';
+            elName.value = '';
+            elNameRomaji.value = '';
+            delete elNameRomaji.dataset.manual;
+            elProcedure.value = '';
+            elDate.value = todayIso();
+            state.isExistingPatient = false;
+            recallBadge.style.display = 'none';
+            updatePreview();
+          }}, '🗑 クリア'),
+          ' ',
+          el('button', { class: 'primary', onclick: onNext, disabled: !cfg.outputRoot }, '次へ：取り込み元選択 →'),
+        ),
       ),
     );
 

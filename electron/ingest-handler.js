@@ -26,6 +26,18 @@ function emitProgress(payload) {
   }
 }
 
+// 中断フラグ + 進行中ストリーム参照（取り込み中に cancel が呼ばれたら destroy する）
+let cancelRequested = false;
+let activeReadStream = null;
+let activeWriteStream = null;
+
+ipcMain.handle('ingest:cancel', async () => {
+  cancelRequested = true;
+  if (activeReadStream) { try { activeReadStream.destroy(); } catch (_) {} }
+  if (activeWriteStream) { try { activeWriteStream.destroy(); } catch (_) {} }
+  return { ok: true };
+});
+
 ipcMain.handle('ingest:listVolumes', async () => {
   try {
     const entries = await fsp.readdir('/Volumes', { withFileTypes: true });
@@ -200,9 +212,11 @@ function copyStream(src, dst) {
   return new Promise((resolve, reject) => {
     const rs = fs.createReadStream(src);
     const ws = fs.createWriteStream(dst);
-    rs.on('error', reject);
-    ws.on('error', reject);
-    ws.on('close', resolve);
+    activeReadStream = rs;
+    activeWriteStream = ws;
+    rs.on('error', (e) => { activeReadStream = null; activeWriteStream = null; reject(e); });
+    ws.on('error', (e) => { activeReadStream = null; activeWriteStream = null; reject(e); });
+    ws.on('close', () => { activeReadStream = null; activeWriteStream = null; resolve(); });
     rs.pipe(ws);
   });
 }
@@ -225,9 +239,13 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
   const failures = [];
   const dicomCandidates = [];
 
+  // 中断フラグを初期化（前回の取り込みでセットされた値をクリア）
+  cancelRequested = false;
+
   emitProgress({ type: 'start', total: planned.length, totalBytes });
 
   for (let i = 0; i < planned.length; i++) {
+    if (cancelRequested) break; // ユーザーが中断要求
     const f = planned[i];
     emitProgress({
       type: 'file-start',
@@ -320,15 +338,25 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
         totalBytes,
       });
     } catch (e) {
-      failed++;
-      failures.push({ file: f.path, error: String(e?.message || e) });
-      emitProgress({ type: 'file-fail', index: i, name: path.basename(f.path), error: String(e?.message || e) });
+      // 中断要求由来のストリーム destroy エラーは失敗にカウントしない
+      if (cancelRequested) {
+        // 中途半端な dst ファイルがあれば削除
+        try {
+          const partialDst = e.path; // fs error は path を持っていることが多い
+          if (partialDst && fs.existsSync(partialDst)) fs.unlinkSync(partialDst);
+        } catch (_) {}
+      } else {
+        failed++;
+        failures.push({ file: f.path, error: String(e?.message || e) });
+        emitProgress({ type: 'file-fail', index: i, name: path.basename(f.path), error: String(e?.message || e) });
+      }
     }
   }
 
-  emitProgress({ type: 'done', copied, skippedDup, failed });
+  const cancelled = cancelRequested;
+  emitProgress({ type: 'done', copied, skippedDup, failed, cancelled });
 
-  // 履歴に記録（1ファイル以上コピーまたはスキップで再取込が起きた場合）
+  // 履歴に記録（1ファイル以上コピーまたはスキップで再取込が起きた場合、中断時も記録）
   if ((copied > 0 || skippedDup > 0) && args.folderName) {
     history.recordSession({
       folderName: args.folderName,
@@ -339,7 +367,8 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
   }
 
   return {
-    ok: failed === 0,
+    ok: failed === 0 && !cancelled,
+    cancelled,
     copied,
     skippedDup,
     failed,
