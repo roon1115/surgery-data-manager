@@ -158,7 +158,7 @@ window.Views.source = (function() {
 
     const reloadBtn = el('button', { class: 'ghost', onclick: loadVolumes }, '再読み込み');
 
-    const onNext = () => {
+    const onNext = async () => {
       if (state.sources.length === 0) {
         U.modal({ title: 'ソース未選択', body: '取り込み元を1つ以上追加してください。' });
         return;
@@ -173,6 +173,72 @@ window.Views.source = (function() {
         U.modal({ title: 'ファイルなし', body: '選択されたソースに取り込み可能なファイルがありません。' });
         return;
       }
+
+      // 差分インポート有効なソースは事前ハッシュチェックして重複ファイルにフラグ
+      // → preview で既定除外 → 不要なプレビュー操作を省く
+      const filesToCheck = [];
+      const ownerLookup = []; // [{srcIdx, fIdx}] 並び
+      state.sources.forEach((src, srcIdx) => {
+        if (src.useHashDiff === false) return;
+        src.files.forEach((f, fIdx) => {
+          filesToCheck.push({ path: f.path });
+          ownerLookup.push({ srcIdx, fIdx });
+        });
+      });
+
+      if (filesToCheck.length === 0) {
+        state.goto('preview');
+        return;
+      }
+
+      // 進捗モーダル（キャンセル/OK非表示の固定型）
+      const progressLabel = el('div', { style: { fontSize: '13px', marginBottom: '6px' } }, '重複ファイルをチェック中...');
+      const progressDetail = el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)' } }, `0 / ${filesToCheck.length}`);
+      const progressBar = el('div', { class: 'progress-bar', style: { marginTop: '8px' } },
+        el('div', { class: 'fill', style: { width: '0%' } }));
+      const m = document.getElementById('modal');
+      const content = document.getElementById('modal-content');
+      const okBtn = document.getElementById('modal-ok');
+      const cancelBtn = document.getElementById('modal-cancel');
+      content.innerHTML = '';
+      content.appendChild(el('h3', null, '前処理'));
+      content.appendChild(progressLabel);
+      content.appendChild(progressDetail);
+      content.appendChild(progressBar);
+      okBtn.style.display = 'none';
+      cancelBtn.style.display = 'none';
+      m.classList.remove('hidden');
+
+      const off = window.App.ingest.onCheckProgress((data) => {
+        if (data.type === 'progress' || data.type === 'done') {
+          const n = data.done != null ? data.done : data.total;
+          const pct = data.total > 0 ? n / data.total * 100 : 0;
+          progressDetail.textContent = `${n} / ${data.total}`;
+          progressBar.firstElementChild.style.width = pct.toFixed(1) + '%';
+        }
+      });
+
+      const r = await window.App.ingest.checkDuplicates(filesToCheck);
+      off();
+
+      // 結果を file にマージ
+      if (r.ok && Array.isArray(r.results)) {
+        r.results.forEach((res, i) => {
+          if (!res) return;
+          const owner = ownerLookup[i];
+          const f = state.sources[owner.srcIdx].files[owner.fIdx];
+          f.sha256 = res.sha256;
+          f.alreadyImported = !!res.alreadyImported;
+          if (f.alreadyImported) f.selected = false;
+          else if (f.selected === undefined) f.selected = true;
+        });
+      }
+      state.lastDuplicateCount = r.duplicateCount || 0;
+
+      okBtn.style.display = '';
+      cancelBtn.style.display = '';
+      m.classList.add('hidden');
+
       state.goto('preview');
     };
 

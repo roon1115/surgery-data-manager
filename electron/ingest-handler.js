@@ -349,6 +349,56 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
   };
 });
 
+// プレビュー前の重複チェック: 全ファイルを並行ハッシュ計算し、履歴DBと照合
+// 結果: [{ path, sha256, alreadyImported }] を返す
+// 進捗は ingest:checkProgress イベントで通知
+ipcMain.handle('ingest:checkDuplicates', async (_e, args = {}) => {
+  const files = Array.isArray(args.files) ? args.files : [];
+  if (files.length === 0) return { ok: true, results: [] };
+
+  const total = files.length;
+  let done = 0;
+  const results = new Array(total);
+  const CONCURRENCY = 4; // I/Oバウンドなので4並列くらいが妥当
+  let nextIdx = 0;
+
+  const emit = (payload) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send('ingest:checkProgress', payload);
+    }
+  };
+
+  emit({ type: 'start', total });
+
+  async function worker() {
+    while (true) {
+      const i = nextIdx++;
+      if (i >= total) return;
+      const f = files[i];
+      try {
+        const sha = await hashFile(f.path);
+        const dup = db.hasHash(sha);
+        results[i] = { path: f.path, sha256: sha, alreadyImported: dup };
+      } catch (e) {
+        results[i] = { path: f.path, sha256: null, alreadyImported: false, error: String(e?.message || e) };
+      }
+      done++;
+      // 進捗は10ファイルごとか終端で通知（イベント抑制）
+      if (done % 10 === 0 || done === total) {
+        emit({ type: 'progress', done, total });
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(CONCURRENCY, total) }, () => worker());
+  await Promise.all(workers);
+
+  emit({ type: 'done', total });
+
+  const dupCount = results.filter(r => r && r.alreadyImported).length;
+  return { ok: true, results, duplicateCount: dupCount };
+});
+
 // /Volumes/ 配下のボリュームを eject する（macOS: diskutil eject）
 ipcMain.handle('ingest:ejectVolume', async (_e, args = {}) => {
   const { volumePath } = args;

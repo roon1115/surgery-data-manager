@@ -90,6 +90,9 @@ window.Views.preview = (function() {
         el('div', { class: 'label' }, 'ソース数')));
     }
 
+    // 既取込ファイルを表示するかのトグル（既定: 非表示）
+    if (state.showAlreadyImported === undefined) state.showAlreadyImported = false;
+
     function renderSources() {
       sourcesEl.innerHTML = '';
       state.sources.forEach((src, srcIdx) => {
@@ -99,6 +102,7 @@ window.Views.preview = (function() {
           return;
         }
         const destPath = targetPathFor(src.type);
+        const dupCount = src.files.filter(f => f.alreadyImported).length;
         const selectedCount = src.files.filter(f => f.selected).length;
         const totalCount = src.files.length;
         const selectedBytes = src.files.filter(f => f.selected).reduce((a, b) => a + (b.size || 0), 0);
@@ -120,12 +124,12 @@ window.Views.preview = (function() {
           renderSources();
         }}, expanded ? '▼ 折りたたむ' : `▶ ${totalCount} 件を表示`);
 
-        // ファイル一覧テーブル
+        // ファイル一覧テーブル（既取込は state.showAlreadyImported=true の時だけ表示）
         let fileListEl = el('div');
         if (expanded) {
-          // ソート: パスのアルファベット順
-          const sortedFiles = [...src.files].sort((a, b) =>
-            (a.relPath || a.path).localeCompare(b.relPath || b.path));
+          const sortedFiles = [...src.files]
+            .filter(f => state.showAlreadyImported || !f.alreadyImported)
+            .sort((a, b) => (a.relPath || a.path).localeCompare(b.relPath || b.path));
 
           const ul = el('ul', { class: 'file-list', style: { maxHeight: '300px' } });
           sortedFiles.forEach((f) => {
@@ -138,11 +142,12 @@ window.Views.preview = (function() {
             cb.addEventListener('change', () => {
               f.selected = cb.checked;
               renderSummary();
-              // ヘッダの選択数も再描画
               renderSources();
             });
 
-            ul.appendChild(el('li', null,
+            ul.appendChild(el('li', {
+              style: f.alreadyImported ? { opacity: '0.55' } : null,
+            },
               el('div', { class: 'checkbox', style: { flex: '1', minWidth: 0 } },
                 cb,
                 el('div', { style: { flex: '1', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, filename),
@@ -150,11 +155,18 @@ window.Views.preview = (function() {
               el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', whiteSpace: 'nowrap', marginLeft: '8px' } },
                 formatBytes(f.size || 0),
               ),
+              f.alreadyImported
+                ? el('span', { class: 'kind-badge', style: { marginLeft: '8px', background: 'rgba(100,116,139,0.2)', color: 'var(--fg-mute)' } }, '既取込')
+                : null,
               isDicomCandidate
                 ? el('span', { class: 'kind-badge kind-photo', style: { marginLeft: '8px' } }, 'DICOM')
                 : null,
             ));
           });
+          if (sortedFiles.length === 0) {
+            ul.appendChild(el('li', { style: { color: 'var(--fg-mute)', fontSize: '12px' } },
+              dupCount > 0 ? `（全 ${totalCount} 件が既取込のため非表示）` : '（ファイルがありません）'));
+          }
           fileListEl = ul;
         }
 
@@ -175,8 +187,9 @@ window.Views.preview = (function() {
           el('div', { class: 'row', style: { alignItems: 'center', marginBottom: '8px' } },
             el('div', { style: { flex: '1', fontSize: '12px' } },
               `選択: ${selectedCount} / ${totalCount} ファイル（${formatBytes(selectedBytes)}）`,
-              src.useHashDiff !== false
-                ? el('span', { style: { marginLeft: '8px', color: 'var(--ok)' } }, '✓ 差分インポート有効（既取込ファイルは自動スキップ）')
+              dupCount > 0
+                ? el('span', { style: { marginLeft: '8px', color: 'var(--fg-mute)' } },
+                    `／ うち既取込 ${dupCount} 件は除外済み`)
                 : null,
             ),
             allOnBtn, allOffBtn, toggleBtn,
@@ -222,10 +235,25 @@ window.Views.preview = (function() {
         summaryEl,
       ),
       el('div', { class: 'card' },
-        el('h2', null, 'ソース別 内訳'),
+        el('div', { class: 'row', style: { alignItems: 'center' } },
+          el('h2', { style: { flex: 1, margin: 0 } }, 'ソース別 内訳'),
+          (function() {
+            const totalDup = state.sources.reduce((s, src) =>
+              s + src.files.filter(f => f.alreadyImported).length, 0);
+            if (totalDup === 0) return null;
+            const toggleCb = el('input', { type: 'checkbox' });
+            toggleCb.checked = !!state.showAlreadyImported;
+            toggleCb.addEventListener('change', () => {
+              state.showAlreadyImported = toggleCb.checked;
+              renderSources();
+            });
+            return el('label', { class: 'checkbox', style: { fontSize: '12px' } },
+              toggleCb, ` 既取込 ${totalDup} 件も表示`);
+          })(),
+        ),
         el('div', { class: 'banner' },
           '実際にコピーされる前に確認してください。不要なファイルはチェックを外すと除外できます。'
-          + ' 差分インポートが有効なソースは、既に取り込み済みのファイルがコピー時に自動スキップされます。'),
+          + ' 事前にハッシュチェック済みのため、既取込ファイルは自動で除外表示されています。'),
         sourcesEl,
         el('div', { class: 'actions between' },
           backBtn,

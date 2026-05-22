@@ -58,6 +58,9 @@
   document.getElementById('btn-settings').addEventListener('click', () => {
     state.goto('settings');
   });
+  document.getElementById('btn-manual').addEventListener('click', () => {
+    window.App.openManual();
+  });
 
   // 初期化: 設定が空なら settings → 揃っていれば patient
   (async function init() {
