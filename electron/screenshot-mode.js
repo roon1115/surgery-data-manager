@@ -13,17 +13,18 @@ const OUT_DIR = '/tmp/sdm-screenshots';
 fs.mkdirSync(OUT_DIR, { recursive: true });
 
 const SCREENS = [
-  { name: '01-settings', step: 'settings' },
-  { name: '02-patient', step: 'patient' },
-  { name: '03-source', step: 'source' },
-  { name: '04-preview', step: 'preview' },
-  { name: '05-ingest', step: 'ingest' },
-  { name: '06-dicom', step: 'dicom' },
-  { name: '07-done', step: 'done' },
+  { name: '01-settings-locked',   step: 'settings', unlock: false },
+  { name: '02-settings-unlocked', step: 'settings', unlock: true },
+  { name: '03-patient',           step: 'patient' },
+  { name: '04-source',            step: 'source' },
+  { name: '05-preview',           step: 'preview' },
+  { name: '06-ingest',            step: 'ingest' },
+  { name: '07-dicom',             step: 'dicom' },
+  { name: '08-done',              step: 'done' },
 ];
 
 async function capture(win, name) {
-  await new Promise(r => setTimeout(r, 800)); // レンダリング待ち
+  await new Promise(r => setTimeout(r, 1000)); // レンダリング待ち（除外ボリューム取得など）
   const img = await win.webContents.capturePage();
   const buf = img.toPNG();
   const outPath = path.join(OUT_DIR, name + '.png');
@@ -35,7 +36,6 @@ async function run(win) {
   // mockState を仕込んで各画面に遷移
   const mockSetup = `
     (async () => {
-      // 設定をセット
       await window.App.settings.save({
         outputRoot: '/Volumes/Stella_8TB',
         dicom: { callingAet: 'SURGERY', calledAet: 'STELLADICOM', host: 'stelladicom.local', port: 104, modality: 'OT', transferSyntax: '1.2.840.10008.1.2' },
@@ -46,12 +46,19 @@ async function run(win) {
           bronchoscope: '/Volumes/Stella_8TB/気管支鏡',
           endoscope: '/Volumes/Stella_8TB/内視鏡',
         },
+        enabledTypes: {
+          anesthesia: true, surgicalPhoto: true, laparoscope: true,
+          bronchoscope: false, endoscope: false,
+        },
+        deleteAfterCopy: {
+          anesthesia: true, surgicalPhoto: false, laparoscope: false,
+          bronchoscope: false, endoscope: false,
+        },
       });
-      // ダミーstate を window.__sdmState に置く
       window.__sdmState = {
         step: 'patient',
         settings: await window.App.settings.get(),
-        patient: { id: 'P0001', name: 'モモ', nameRomaji: 'MOMO', procedure: '去勢術', date: '2026-05-19' },
+        patient: { id: 'P0001', name: 'モモ', nameRomaji: 'MOMO', procedure: '去勢術', date: '2026-05-22' },
         sources: [{
           path: '/Volumes/Camera_SD',
           name: 'Camera_SD',
@@ -75,18 +82,19 @@ async function run(win) {
           summary: { photo: 0, video: 0, csv: 1, other: 0, totalBytes: 24_000 },
         }],
         targets: {
-          surgicalPhoto: '/Volumes/Stella_8TB/手術写真/2026-05-19_P0001_モモ_去勢術',
-          anesthesia: '/Volumes/Stella_8TB/麻酔記録/2026-05-19_P0001_モモ_去勢術',
+          surgicalPhoto: '/Volumes/Stella_8TB/手術写真/2026-05-22_P0001_モモ_去勢術',
+          anesthesia: '/Volumes/Stella_8TB/麻酔記録/2026-05-22_P0001_モモ_去勢術',
         },
-        folderName: '2026-05-19_P0001_モモ_去勢術',
+        folderName: '2026-05-22_P0001_モモ_去勢術',
         ingestResult: {
           copied: 4,
           skippedDup: 1,
           failed: 0,
+          deleted: 1,
           dicomCandidates: [
-            { path: '/Volumes/Stella_8TB/手術写真/2026-05-19_P0001_モモ_去勢術/IMG_0001.jpg', name: 'IMG_0001.jpg' },
-            { path: '/Volumes/Stella_8TB/手術写真/2026-05-19_P0001_モモ_去勢術/IMG_0002.jpg', name: 'IMG_0002.jpg' },
-            { path: '/Volumes/Stella_8TB/手術写真/2026-05-19_P0001_モモ_去勢術/IMG_0003.jpg', name: 'IMG_0003.jpg' },
+            { path: '/Volumes/Stella_8TB/手術写真/2026-05-22_P0001_モモ_去勢術/IMG_0001.jpg', name: 'IMG_0001.jpg' },
+            { path: '/Volumes/Stella_8TB/手術写真/2026-05-22_P0001_モモ_去勢術/IMG_0002.jpg', name: 'IMG_0002.jpg' },
+            { path: '/Volumes/Stella_8TB/手術写真/2026-05-22_P0001_モモ_去勢術/IMG_0003.jpg', name: 'IMG_0003.jpg' },
           ],
         },
         dicomResult: { ok: true, sent: 3 },
@@ -101,13 +109,11 @@ async function run(win) {
     const script = `
       (async () => {
         window.__sdmState.step = '${sc.step}';
-        // 既存の app.js の render を再利用するため、グローバル参照を作る
         const mount = document.getElementById('app');
         const view = window.Views['${sc.step}'];
         if (view) {
           try { await view.render(window.__sdmState, mount); } catch(e) { console.error('render error', e); }
         }
-        // ステップインジケーター更新
         const order = ['settings','patient','source','preview','ingest','dicom','done'];
         const idx = order.indexOf('${sc.step}');
         document.querySelectorAll('.step').forEach(el => {
@@ -115,6 +121,19 @@ async function run(win) {
           el.classList.toggle('active', k === '${sc.step === 'settings' ? 'patient' : sc.step}');
           el.classList.toggle('done', order.indexOf(k) < idx);
         });
+        // settings 画面でロック解除モードのスクショを撮る場合
+        if (${sc.unlock ? 'true' : 'false'}) {
+          // 全 input/select を強制 enable + opacity 1
+          mount.querySelectorAll('input, select, button').forEach(e => {
+            e.disabled = false; e.style.opacity = '';
+          });
+          // バナーを編集モード風に上書き
+          const banner = mount.querySelector('.banner');
+          if (banner) {
+            banner.className = 'banner warn';
+            banner.textContent = '⚠ 編集モード中です。各項目は変更可能になっています。';
+          }
+        }
       })();
     `;
     await win.webContents.executeJavaScript(script);
@@ -126,7 +145,6 @@ async function run(win) {
 }
 
 app.whenReady().then(async () => {
-  // BrowserWindow が出来るのを待つ
   for (let i = 0; i < 40; i++) {
     const w = BrowserWindow.getAllWindows()[0];
     if (w && !w.webContents.isLoading()) {
