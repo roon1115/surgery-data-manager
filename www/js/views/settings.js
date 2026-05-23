@@ -26,9 +26,12 @@ window.Views.settings = (function() {
     // 5種別の保存先フォルダ + 有効/無効
     const tf = cfg.typeFolders || {};
     const et = cfg.enabledTypes || {};
+    const dac = cfg.deleteAfterCopy || {};
     const makeTypeFolderRow = (typeKey, defaultValue) => {
       const enabledCb = el('input', { type: 'checkbox' });
       enabledCb.checked = et[typeKey] !== false;
+      const deleteCb = el('input', { type: 'checkbox' });
+      deleteCb.checked = dac[typeKey] === true;
       const input = el('input', {
         type: 'text',
         value: tf[typeKey] || '',
@@ -38,13 +41,74 @@ window.Views.settings = (function() {
         const r = await window.App.settings.chooseTypeFolder(typeKey);
         if (r.ok) input.value = r.path;
       }}, '選択...');
-      return { input, browseBtn, enabledCb };
+      return { input, browseBtn, enabledCb, deleteCb };
     };
     const rAnesthesia = makeTypeFolderRow('anesthesia', '麻酔記録');
     const rSurgicalPhoto = makeTypeFolderRow('surgicalPhoto', '手術写真');
     const rLaparoscope = makeTypeFolderRow('laparoscope', '腹腔鏡');
     const rBronchoscope = makeTypeFolderRow('bronchoscope', '気管支鏡');
     const rEndoscope = makeTypeFolderRow('endoscope', '内視鏡');
+
+    // 除外ボリューム: チェックすると取り込み元画面の検出一覧から外れる
+    const excludedVolumesEl = el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)' } }, '読み込み中...');
+    const excludedVolumesState = new Set((cfg.excludedVolumes || []));
+    const refreshExcludedVolumes = async () => {
+      const r = await window.App.ingest.listVolumes();
+      excludedVolumesEl.innerHTML = '';
+      if (!r.ok || !r.volumes || r.volumes.length === 0) {
+        excludedVolumesEl.appendChild(el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)' } },
+          '検出されたボリュームはありません。'));
+        // 既に設定済の除外パスを表示（ボリュームがマウントされていなくても削除できるよう）
+        if (excludedVolumesState.size > 0) {
+          const ul = el('ul', { class: 'volume-list', style: { maxHeight: '180px', marginTop: '8px' } });
+          for (const p of excludedVolumesState) {
+            const removeBtn = el('button', { class: 'ghost', onclick: () => {
+              excludedVolumesState.delete(p);
+              refreshExcludedVolumes();
+            }}, '解除');
+            ul.appendChild(el('li', null,
+              el('div', { style: { flex: '1', fontFamily: 'SF Mono, monospace', fontSize: '12px' } }, p + ' (現在未接続)'),
+              removeBtn,
+            ));
+          }
+          excludedVolumesEl.appendChild(ul);
+        }
+        return;
+      }
+      const ul = el('ul', { class: 'volume-list', style: { maxHeight: '220px' } });
+      const knownPaths = new Set();
+      r.volumes.forEach(vol => {
+        knownPaths.add(vol.path);
+        const cb = el('input', { type: 'checkbox' });
+        cb.checked = excludedVolumesState.has(vol.path);
+        cb.addEventListener('change', () => {
+          if (cb.checked) excludedVolumesState.add(vol.path);
+          else excludedVolumesState.delete(vol.path);
+        });
+        ul.appendChild(el('li', null,
+          el('label', { class: 'checkbox', style: { flex: '1' } },
+            cb,
+            el('span', { style: { marginLeft: '4px' } }, vol.name),
+            el('span', { style: { marginLeft: '8px', fontSize: '11px', color: 'var(--fg-mute)' } }, vol.path),
+          ),
+        ));
+      });
+      // 既に excluded だが現在マウントされていないパスも表示
+      for (const p of excludedVolumesState) {
+        if (knownPaths.has(p)) continue;
+        const removeBtn = el('button', { class: 'ghost', onclick: () => {
+          excludedVolumesState.delete(p);
+          refreshExcludedVolumes();
+        }}, '解除');
+        ul.appendChild(el('li', null,
+          el('div', { style: { flex: '1', fontFamily: 'SF Mono, monospace', fontSize: '12px', color: 'var(--fg-mute)' } },
+            '✓ ' + p + ' (現在未接続)'),
+          removeBtn,
+        ));
+      }
+      excludedVolumesEl.appendChild(ul);
+    };
+    const refreshExcludedVolumesBtn = el('button', { class: 'ghost', onclick: refreshExcludedVolumes }, '↻ 再読み込み');
 
     const updateStatus = el('span', { style: { marginLeft: '8px', color: 'var(--fg-mute)' } }, '');
     const updateCheckBtn = el('button', { class: 'ghost', onclick: async () => {
@@ -107,6 +171,14 @@ window.Views.settings = (function() {
           bronchoscope: rBronchoscope.enabledCb.checked,
           endoscope: rEndoscope.enabledCb.checked,
         },
+        deleteAfterCopy: {
+          anesthesia: rAnesthesia.deleteCb.checked,
+          surgicalPhoto: rSurgicalPhoto.deleteCb.checked,
+          laparoscope: rLaparoscope.deleteCb.checked,
+          bronchoscope: rBronchoscope.deleteCb.checked,
+          endoscope: rEndoscope.deleteCb.checked,
+        },
+        excludedVolumes: Array.from(excludedVolumesState),
       };
       await window.App.settings.save(partial);
       state.settings = await window.App.settings.get();
@@ -117,11 +189,12 @@ window.Views.settings = (function() {
     const editableEls = [
       elOutputRoot, elBrowse,
       elAet, elCalledAet, elHost, elPort, elModality, elTs,
-      rAnesthesia.input, rAnesthesia.browseBtn, rAnesthesia.enabledCb,
-      rSurgicalPhoto.input, rSurgicalPhoto.browseBtn, rSurgicalPhoto.enabledCb,
-      rLaparoscope.input, rLaparoscope.browseBtn, rLaparoscope.enabledCb,
-      rBronchoscope.input, rBronchoscope.browseBtn, rBronchoscope.enabledCb,
-      rEndoscope.input, rEndoscope.browseBtn, rEndoscope.enabledCb,
+      rAnesthesia.input, rAnesthesia.browseBtn, rAnesthesia.enabledCb, rAnesthesia.deleteCb,
+      rSurgicalPhoto.input, rSurgicalPhoto.browseBtn, rSurgicalPhoto.enabledCb, rSurgicalPhoto.deleteCb,
+      rLaparoscope.input, rLaparoscope.browseBtn, rLaparoscope.enabledCb, rLaparoscope.deleteCb,
+      rBronchoscope.input, rBronchoscope.browseBtn, rBronchoscope.enabledCb, rBronchoscope.deleteCb,
+      rEndoscope.input, rEndoscope.browseBtn, rEndoscope.enabledCb, rEndoscope.deleteCb,
+      refreshExcludedVolumesBtn,
     ];
 
     // 既定はロック状態
@@ -209,17 +282,37 @@ window.Views.settings = (function() {
         echoBtn,
         echoStatus,
       ),
+      el('h3', null, '取り込み元から除外するボリューム'),
+      el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginBottom: '6px' } },
+        '常時マウントされている HDD/Time Machine 等で、取り込み元に出てきてほしくないボリュームに ✓ を入れてください。',
+        el('br'),
+        'チェックしたボリュームは「取り込み元」画面の検出一覧から除外されます。'),
+      el('div', { class: 'row', style: { marginBottom: '6px' } }, refreshExcludedVolumesBtn),
+      excludedVolumesEl,
+
       el('h3', null, '種別ごとの保存先フォルダ'),
       el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginBottom: '6px' } },
         '各種別のデータは指定フォルダ配下に「患者フォルダ」を作って収納されます（例: 手術写真/2026-05-22_P0001_モモ_去勢術/）。',
         el('br'),
         '絶対パス推奨。空欄や相対パスにすると「出力ルート」配下として解決されます。',
         el('br'),
-        '左のチェックを外すと、その種別は取り込み元選択画面に表示されなくなります。'),
+        '「使う」: 取り込み元画面の種別ドロップダウンに表示するか。',
+        el('br'),
+        '「コピー後削除」: コピー＋ハッシュ照合成功後、元データ（src）を削除する。削除前にも再リチェックします。'),
       (function() {
+        const headerStyle = { flex: 'none', fontSize: '11px', color: 'var(--fg-mute)', textAlign: 'center' };
+        // ヘッダ行
+        const header = el('div', { class: 'row', style: { alignItems: 'center', gap: '8px', marginBottom: '4px', paddingBottom: '2px', borderBottom: '1px solid var(--border)' } },
+          el('span', { ...{}, style: { ...headerStyle, minWidth: '32px' } }, '使う'),
+          el('span', { ...{}, style: { ...headerStyle, minWidth: '46px' } }, 'コピー後削除'),
+          el('span', { ...{}, style: { ...headerStyle, minWidth: '160px', textAlign: 'left' } }, '種別'),
+          el('span', { ...{}, style: { ...headerStyle, flex: '4', textAlign: 'left' } }, '保存先フォルダ'),
+          el('span', { ...{}, style: { ...headerStyle, flex: '1' } }, ''),
+        );
         const makeRow = (label, row, hint) => el('div', { class: 'field' },
           el('div', { class: 'row', style: { alignItems: 'center', gap: '8px' } },
-            el('label', { class: 'checkbox', style: { flex: 'none', minWidth: '32px' } }, row.enabledCb),
+            el('label', { class: 'checkbox', style: { flex: 'none', minWidth: '32px', justifyContent: 'center' } }, row.enabledCb),
+            el('label', { class: 'checkbox', style: { flex: 'none', minWidth: '46px', justifyContent: 'center' } }, row.deleteCb),
             el('span', { class: 'label', style: { flex: 'none', minWidth: '160px', marginBottom: 0 } }, label),
             el('div', { style: { flex: '4' } }, row.input),
             el('div', { style: { flex: '1' } }, row.browseBtn),
@@ -227,6 +320,7 @@ window.Views.settings = (function() {
           hint ? el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginTop: '2px' } }, hint) : null,
         );
         return el('div', null,
+          header,
           makeRow('麻酔モニター記録', rAnesthesia),
           makeRow('手術写真（DICOM送信対象）', rSurgicalPhoto),
           makeRow('腹腔鏡', rLaparoscope),
@@ -250,6 +344,7 @@ window.Views.settings = (function() {
 
     mount.replaceChildren(root);
     applyLock(); // 初期化
+    refreshExcludedVolumes(); // 検出ボリュームを取得して表示
   }
 
   return { render };

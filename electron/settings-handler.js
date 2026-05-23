@@ -29,6 +29,17 @@ const store = new Store({
       bronchoscope: true,
       endoscope: true,
     },
+    // 取り込み元として一覧から除外するボリュームのパス配列（例: /Volumes/Time Machine）
+    excludedVolumes: [],
+    // 種別ごとに「コピー成功 + ハッシュ照合OK後、元データ（src）を削除する」フラグ
+    // 既定はすべて false（安全側）
+    deleteAfterCopy: {
+      anesthesia: false,
+      surgicalPhoto: false,
+      laparoscope: false,
+      bronchoscope: false,
+      endoscope: false,
+    },
   },
 });
 
@@ -48,18 +59,31 @@ const DEFAULT_ENABLED_TYPES = {
   endoscope: true,
 };
 
+const DEFAULT_DELETE_AFTER_COPY = {
+  anesthesia: false,
+  surgicalPhoto: false,
+  laparoscope: false,
+  bronchoscope: false,
+  endoscope: false,
+};
+
 function getAll() {
   const tf = store.get('typeFolders') || {};
   const et = store.get('enabledTypes') || {};
+  const dac = store.get('deleteAfterCopy') || {};
   // 既存設定にキーが欠けていてもデフォルトで補完
   const typeFolders = { ...DEFAULT_TYPE_FOLDERS, ...tf };
   const enabledTypes = { ...DEFAULT_ENABLED_TYPES, ...et };
+  const deleteAfterCopy = { ...DEFAULT_DELETE_AFTER_COPY, ...dac };
+  const excludedVolumes = Array.isArray(store.get('excludedVolumes')) ? store.get('excludedVolumes') : [];
   return {
     outputRoot: store.get('outputRoot'),
     dicom: store.get('dicom'),
     folderPattern: store.get('folderPattern'),
     typeFolders,
     enabledTypes,
+    excludedVolumes,
+    deleteAfterCopy,
   };
 }
 
@@ -79,6 +103,13 @@ ipcMain.handle('settings:save', async (_e, partial = {}) => {
   if (partial.enabledTypes && typeof partial.enabledTypes === 'object') {
     const cur = store.get('enabledTypes') || {};
     store.set('enabledTypes', { ...DEFAULT_ENABLED_TYPES, ...cur, ...partial.enabledTypes });
+  }
+  if (Array.isArray(partial.excludedVolumes)) {
+    store.set('excludedVolumes', partial.excludedVolumes.filter(v => typeof v === 'string' && v));
+  }
+  if (partial.deleteAfterCopy && typeof partial.deleteAfterCopy === 'object') {
+    const cur = store.get('deleteAfterCopy') || {};
+    store.set('deleteAfterCopy', { ...DEFAULT_DELETE_AFTER_COPY, ...cur, ...partial.deleteAfterCopy });
   }
   return getAll();
 });

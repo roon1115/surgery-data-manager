@@ -236,11 +236,16 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
   let copied = 0;
   let skippedDup = 0;
   let failed = 0;
+  let deleted = 0;       // 種別 deleteAfterCopy=true で削除された元ファイル数
   const failures = [];
   const dicomCandidates = [];
 
   // 中断フラグを初期化（前回の取り込みでセットされた値をクリア）
   cancelRequested = false;
+
+  // 削除設定を取得（種別ごと）
+  const cfg = settings.getAll();
+  const deleteAfterCopy = cfg.deleteAfterCopy || {};
 
   emitProgress({ type: 'start', total: planned.length, totalBytes });
 
@@ -293,21 +298,23 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
 
       await copyStream(f.path, dst);
 
-      if (diffEnabled && sha) {
-        const dstSha = await hashFile(dst);
-        if (dstSha !== sha) {
-          fs.unlinkSync(dst);
-          failed++;
-          failures.push({ file: f.path, error: 'ハッシュ不一致（コピー失敗）' });
-          emitProgress({ type: 'file-fail', index: i, name: path.basename(f.path), error: 'ハッシュ不一致' });
-          continue;
-        }
+      // === コピー後リチェック（常に実施）===
+      // src のハッシュをまだ計算していなければここで算出
+      let srcSha = sha;
+      if (!srcSha) srcSha = await hashFile(f.path);
+      const dstSha = await hashFile(dst);
+      if (dstSha !== srcSha) {
+        try { fs.unlinkSync(dst); } catch (_) {}
+        failed++;
+        failures.push({ file: f.path, error: 'コピー後リチェック失敗（ハッシュ不一致）' });
+        emitProgress({ type: 'file-fail', index: i, name: path.basename(f.path), error: 'コピー後リチェック失敗' });
+        continue;
       }
 
       const stat = fs.statSync(f.path);
-      if (diffEnabled && sha) {
+      if (diffEnabled) {
         db.recordFile({
-          sha256: sha,
+          sha256: srcSha,
           srcPath: f.path,
           dstPath: dst,
           size: stat.size,
@@ -337,6 +344,30 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
         bytes: doneBytes,
         totalBytes,
       });
+
+      // === 種別が deleteAfterCopy なら、削除前にもう一度リチェックして削除 ===
+      if (f.type && deleteAfterCopy[f.type] === true) {
+        try {
+          // 削除前リチェック: src の現在のハッシュを再計算し、dst と照合
+          const srcReCheck = await hashFile(f.path);
+          if (srcReCheck === dstSha) {
+            fs.unlinkSync(f.path);
+            deleted++;
+            emitProgress({
+              type: 'file-deleted',
+              index: i,
+              name: path.basename(f.path),
+              src: f.path,
+            });
+          } else {
+            failures.push({ file: f.path, error: '削除前リチェック失敗（src のハッシュが dst と一致しないため削除せず）' });
+            emitProgress({ type: 'file-fail', index: i, name: path.basename(f.path), error: '削除前リチェック失敗' });
+          }
+        } catch (e) {
+          failures.push({ file: f.path, error: '削除失敗: ' + (e?.message || e) });
+          emitProgress({ type: 'file-fail', index: i, name: path.basename(f.path), error: '削除失敗: ' + (e?.message || e) });
+        }
+      }
     } catch (e) {
       // 中断要求由来のストリーム destroy エラーは失敗にカウントしない
       if (cancelRequested) {
@@ -354,7 +385,7 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
   }
 
   const cancelled = cancelRequested;
-  emitProgress({ type: 'done', copied, skippedDup, failed, cancelled });
+  emitProgress({ type: 'done', copied, skippedDup, failed, deleted, cancelled });
 
   // 履歴に記録（1ファイル以上コピーまたはスキップで再取込が起きた場合、中断時も記録）
   if ((copied > 0 || skippedDup > 0) && args.folderName) {
@@ -372,6 +403,7 @@ ipcMain.handle('ingest:start', async (_e, args = {}) => {
     copied,
     skippedDup,
     failed,
+    deleted,
     failures,
     dicomCandidates,
     targets,

@@ -114,11 +114,18 @@ window.Views.source = (function() {
         elVolumes.appendChild(el('li', null, 'ボリュームの取得に失敗: ' + (r.error || '')));
         return;
       }
-      if (r.volumes.length === 0) {
-        elVolumes.appendChild(el('li', null, '検出されたボリュームはありません。SDカード等を接続してから「再読み込み」を押してください。'));
+      // 設定で除外指定されているボリュームをフィルタ
+      const excluded = new Set(cfg.excludedVolumes || []);
+      const visibleVolumes = r.volumes.filter(v => !excluded.has(v.path));
+      if (visibleVolumes.length === 0) {
+        const hiddenCount = r.volumes.length - visibleVolumes.length;
+        elVolumes.appendChild(el('li', null,
+          hiddenCount > 0
+            ? `検出されたボリュームはありますが、${hiddenCount}件が設定で除外されています。SDカード等を接続してから「再読み込み」を押してください。`
+            : '検出されたボリュームはありません。SDカード等を接続してから「再読み込み」を押してください。'));
         return;
       }
-      r.volumes.forEach(vol => {
+      visibleVolumes.forEach(vol => {
         const item = el('li', null,
           el('div', { style: { flex: '1' } },
             el('div', { style: { fontWeight: '500' } }, vol.name),
@@ -128,6 +135,12 @@ window.Views.source = (function() {
         );
         elVolumes.appendChild(item);
       });
+      // 除外件数を表示
+      const hiddenCount = r.volumes.length - visibleVolumes.length;
+      if (hiddenCount > 0) {
+        elVolumes.appendChild(el('li', { style: { fontSize: '11px', color: 'var(--fg-mute)', fontStyle: 'italic' } },
+          `（${hiddenCount} 件が設定で除外されています）`));
+      }
     }
 
     async function addSource(srcPath, srcName) {

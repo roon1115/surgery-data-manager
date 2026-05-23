@@ -124,6 +124,7 @@ window.Views.done = (function() {
         el('div', { class: 'stat' }, el('div', { class: 'num' }, String(r.copied || 0)), el('div', { class: 'label' }, 'コピー成功')),
         el('div', { class: 'stat' }, el('div', { class: 'num' }, String(r.skippedDup || 0)), el('div', { class: 'label' }, '差分スキップ')),
         el('div', { class: 'stat' }, el('div', { class: 'num' }, String(r.failed || 0)), el('div', { class: 'label' }, '失敗')),
+        el('div', { class: 'stat' }, el('div', { class: 'num' }, String(r.deleted || 0)), el('div', { class: 'label' }, '元削除')),
         el('div', { class: 'stat' }, el('div', { class: 'num' }, String((r.dicomCandidates || []).length)), el('div', { class: 'label' }, 'DICOM対象')),
       ),
       dicomLine,

@@ -170,6 +170,7 @@ window.Views.preview = (function() {
           fileListEl = ul;
         }
 
+        const willDelete = (cfg.deleteAfterCopy || {})[src.type] === true;
         const card = el('div', { class: 'card', style: { background: 'var(--bg)' } },
           el('div', { class: 'row', style: { alignItems: 'center' } },
             el('div', { style: { flex: '3' } },
@@ -178,6 +179,10 @@ window.Views.preview = (function() {
             ),
             el('span', { class: `kind-badge ${src.type === 'anesthesia' ? 'kind-csv' : 'kind-photo'}` },
               TYPE_LABELS[src.type] || src.type),
+            willDelete
+              ? el('span', { class: 'kind-badge', style: { marginLeft: '8px', background: 'rgba(239,68,68,0.2)', color: 'var(--err)' } },
+                  '🗑 コピー後に元削除')
+              : null,
           ),
           el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)', margin: '8px 0' } },
             '保存先: ',
@@ -223,6 +228,22 @@ window.Views.preview = (function() {
           targetPathFor(t) + '/'));
     });
 
+    // 削除予定種別の警告バナー
+    const deleteAfterCopy = cfg.deleteAfterCopy || {};
+    const willDeleteTypes = usedTypes.filter(t => deleteAfterCopy[t] === true);
+    const deleteBanner = willDeleteTypes.length > 0
+      ? el('div', { class: 'banner err' },
+          el('div', { style: { fontWeight: '600', marginBottom: '4px' } },
+            '⚠ コピー後に元データを削除する種別があります'),
+          el('div', { style: { fontSize: '12px' } },
+            willDeleteTypes.map(t => ({
+              anesthesia: '麻酔モニター記録', surgicalPhoto: '手術写真',
+              laparoscope: '腹腔鏡', bronchoscope: '気管支鏡', endoscope: '内視鏡',
+            })[t] || t).join('、'),
+            ' のソースは、コピー＆ハッシュ照合成功後に元ファイルが削除されます。削除前にもう一度ハッシュをリチェックします。'),
+        )
+      : null;
+
     const root = el('div', null,
       el('div', { class: 'card' },
         el('h2', null, 'コピー内容プレビュー'),
@@ -231,6 +252,7 @@ window.Views.preview = (function() {
           el('div', { style: { marginTop: '8px' } }, '種別ごとの保存先:'),
           ...destSummary,
         ),
+        deleteBanner,
         el('h3', null, 'サマリ'),
         summaryEl,
       ),

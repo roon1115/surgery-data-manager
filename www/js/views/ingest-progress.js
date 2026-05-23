@@ -178,12 +178,16 @@ window.Views.ingest = (function() {
       } else if (data.type === 'file-fail') {
         logLine('✗ ' + data.name + ' — ' + data.error, 'err');
         document.getElementById('st-fail').textContent = String((parseInt(document.getElementById('st-fail').textContent, 10) || 0) + 1);
+      } else if (data.type === 'file-deleted') {
+        logLine('🗑 元データ削除: ' + data.name, 'warn');
       } else if (data.type === 'done') {
+        const delPart = data.deleted ? ` / 削除 ${data.deleted}` : '';
         if (data.cancelled) {
-          elStatus.textContent = `中断しました: コピー済 ${data.copied} / スキップ ${data.skippedDup} / 失敗 ${data.failed}`;
+          elStatus.textContent = `中断しました: コピー済 ${data.copied} / スキップ ${data.skippedDup} / 失敗 ${data.failed}${delPart}`;
           logLine('ユーザー操作により中断されました', 'warn');
         } else {
-          elStatus.textContent = `完了: コピー ${data.copied} / スキップ ${data.skippedDup} / 失敗 ${data.failed}`;
+          elStatus.textContent = `完了: コピー ${data.copied} / スキップ ${data.skippedDup} / 失敗 ${data.failed}${delPart}`;
+          if (data.deleted) logLine(`元データを ${data.deleted} 件削除（削除前リチェック実施済）`, 'warn');
           elProgress.firstElementChild.style.width = '100%';
         }
       }
