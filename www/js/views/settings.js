@@ -23,9 +23,12 @@ window.Views.settings = (function() {
     );
     elTs.value = cfg.dicom.transferSyntax || '1.2.840.10008.1.2';
 
-    // 5種別の保存先フォルダ
+    // 5種別の保存先フォルダ + 有効/無効
     const tf = cfg.typeFolders || {};
+    const et = cfg.enabledTypes || {};
     const makeTypeFolderRow = (typeKey, defaultValue) => {
+      const enabledCb = el('input', { type: 'checkbox' });
+      enabledCb.checked = et[typeKey] !== false;
       const input = el('input', {
         type: 'text',
         value: tf[typeKey] || '',
@@ -35,7 +38,7 @@ window.Views.settings = (function() {
         const r = await window.App.settings.chooseTypeFolder(typeKey);
         if (r.ok) input.value = r.path;
       }}, '選択...');
-      return { input, browseBtn };
+      return { input, browseBtn, enabledCb };
     };
     const rAnesthesia = makeTypeFolderRow('anesthesia', '麻酔記録');
     const rSurgicalPhoto = makeTypeFolderRow('surgicalPhoto', '手術写真');
@@ -97,6 +100,13 @@ window.Views.settings = (function() {
           bronchoscope: rBronchoscope.input.value.trim(),
           endoscope: rEndoscope.input.value.trim(),
         },
+        enabledTypes: {
+          anesthesia: rAnesthesia.enabledCb.checked,
+          surgicalPhoto: rSurgicalPhoto.enabledCb.checked,
+          laparoscope: rLaparoscope.enabledCb.checked,
+          bronchoscope: rBronchoscope.enabledCb.checked,
+          endoscope: rEndoscope.enabledCb.checked,
+        },
       };
       await window.App.settings.save(partial);
       state.settings = await window.App.settings.get();
@@ -107,11 +117,11 @@ window.Views.settings = (function() {
     const editableEls = [
       elOutputRoot, elBrowse,
       elAet, elCalledAet, elHost, elPort, elModality, elTs,
-      rAnesthesia.input, rAnesthesia.browseBtn,
-      rSurgicalPhoto.input, rSurgicalPhoto.browseBtn,
-      rLaparoscope.input, rLaparoscope.browseBtn,
-      rBronchoscope.input, rBronchoscope.browseBtn,
-      rEndoscope.input, rEndoscope.browseBtn,
+      rAnesthesia.input, rAnesthesia.browseBtn, rAnesthesia.enabledCb,
+      rSurgicalPhoto.input, rSurgicalPhoto.browseBtn, rSurgicalPhoto.enabledCb,
+      rLaparoscope.input, rLaparoscope.browseBtn, rLaparoscope.enabledCb,
+      rBronchoscope.input, rBronchoscope.browseBtn, rBronchoscope.enabledCb,
+      rEndoscope.input, rEndoscope.browseBtn, rEndoscope.enabledCb,
     ];
 
     // 既定はロック状態
@@ -203,11 +213,14 @@ window.Views.settings = (function() {
       el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginBottom: '6px' } },
         '各種別のデータは指定フォルダ配下に「患者フォルダ」を作って収納されます（例: 手術写真/2026-05-22_P0001_モモ_去勢術/）。',
         el('br'),
-        '絶対パス推奨。空欄や相対パスにすると「出力ルート」配下として解決されます。'),
+        '絶対パス推奨。空欄や相対パスにすると「出力ルート」配下として解決されます。',
+        el('br'),
+        '左のチェックを外すと、その種別は取り込み元選択画面に表示されなくなります。'),
       (function() {
-        const makeRow = (label, row, hint) => el('label', { class: 'field' },
-          el('span', { class: 'label' }, label),
-          el('div', { class: 'row' },
+        const makeRow = (label, row, hint) => el('div', { class: 'field' },
+          el('div', { class: 'row', style: { alignItems: 'center', gap: '8px' } },
+            el('label', { class: 'checkbox', style: { flex: 'none', minWidth: '32px' } }, row.enabledCb),
+            el('span', { class: 'label', style: { flex: 'none', minWidth: '160px', marginBottom: 0 } }, label),
             el('div', { style: { flex: '4' } }, row.input),
             el('div', { style: { flex: '1' } }, row.browseBtn),
           ),

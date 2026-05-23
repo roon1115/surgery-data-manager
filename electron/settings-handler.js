@@ -22,6 +22,13 @@ const store = new Store({
       bronchoscope: '気管支鏡',
       endoscope: '内視鏡',
     },
+    enabledTypes: {
+      anesthesia: true,
+      surgicalPhoto: true,
+      laparoscope: true,
+      bronchoscope: true,
+      endoscope: true,
+    },
   },
 });
 
@@ -33,15 +40,26 @@ const DEFAULT_TYPE_FOLDERS = {
   endoscope: '内視鏡',
 };
 
+const DEFAULT_ENABLED_TYPES = {
+  anesthesia: true,
+  surgicalPhoto: true,
+  laparoscope: true,
+  bronchoscope: true,
+  endoscope: true,
+};
+
 function getAll() {
   const tf = store.get('typeFolders') || {};
+  const et = store.get('enabledTypes') || {};
   // 既存設定にキーが欠けていてもデフォルトで補完
   const typeFolders = { ...DEFAULT_TYPE_FOLDERS, ...tf };
+  const enabledTypes = { ...DEFAULT_ENABLED_TYPES, ...et };
   return {
     outputRoot: store.get('outputRoot'),
     dicom: store.get('dicom'),
     folderPattern: store.get('folderPattern'),
     typeFolders,
+    enabledTypes,
   };
 }
 
@@ -57,6 +75,10 @@ ipcMain.handle('settings:save', async (_e, partial = {}) => {
   if (partial.typeFolders && typeof partial.typeFolders === 'object') {
     const cur = store.get('typeFolders') || {};
     store.set('typeFolders', { ...DEFAULT_TYPE_FOLDERS, ...cur, ...partial.typeFolders });
+  }
+  if (partial.enabledTypes && typeof partial.enabledTypes === 'object') {
+    const cur = store.get('enabledTypes') || {};
+    store.set('enabledTypes', { ...DEFAULT_ENABLED_TYPES, ...cur, ...partial.enabledTypes });
   }
   return getAll();
 });

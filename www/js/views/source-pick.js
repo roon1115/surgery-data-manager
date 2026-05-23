@@ -2,7 +2,7 @@ window.Views = window.Views || {};
 window.Views.source = (function() {
   const { el, formatBytes } = window.U;
 
-  const TYPE_OPTIONS = [
+  const ALL_TYPE_OPTIONS = [
     { key: 'anesthesia',     label: '麻酔モニター記録',  hint: 'CSV等' },
     { key: 'surgicalPhoto',  label: '手術写真',         hint: '写真→DICOM自動送信対象' },
     { key: 'laparoscope',    label: '腹腔鏡',           hint: '画像/動画' },
@@ -15,6 +15,10 @@ window.Views.source = (function() {
     const cfg = state.settings || await window.App.settings.get();
     state.settings = cfg;
     const typeFolders = cfg.typeFolders || {};
+    const enabledTypes = cfg.enabledTypes || {};
+    // 設定で有効化された種別のみ
+    const TYPE_OPTIONS = ALL_TYPE_OPTIONS.filter(opt => enabledTypes[opt.key] !== false);
+    const defaultType = TYPE_OPTIONS.length > 0 ? TYPE_OPTIONS[0].key : '';
 
     const banner = el('div', { class: 'banner' },
       '接続されているデバイス（SDカード等）を選び、ソースごとに「種別」を1つ選んでください。'
@@ -142,10 +146,20 @@ window.Views.source = (function() {
         name: srcName,
         files: scan.files,
         summary: scan.summary,
-        type: '',           // 未選択。ユーザーが必ず選ぶ
+        type: defaultType,  // 既定: 設定で有効な最初の種別（ユーザーは必要に応じて変更）
         useHashDiff: true,
       });
       renderSources();
+      // 追加直後に取り込み元一覧へ視覚的フィードバック
+      setTimeout(() => {
+        const last = elList.lastElementChild;
+        if (last) {
+          last.style.transition = 'background 0.6s';
+          last.style.background = 'rgba(56, 189, 248, 0.25)';
+          last.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setTimeout(() => { last.style.background = ''; }, 800);
+        }
+      }, 50);
     }
 
     const chooseBtn = el('button', { class: 'ghost', onclick: async () => {
@@ -242,27 +256,41 @@ window.Views.source = (function() {
       state.goto('preview');
     };
 
+    // 取り込み元数バッジ（renderSources 呼出時に MutationObserver で自動更新）
+    const sourceCountBadge = el('span', { style: { marginLeft: '8px', color: 'var(--accent)' } }, `(${state.sources.length})`);
+
     const root = el('div', null,
+      // 1. 上部: 取り込み元一覧（既に追加したもの）
       el('div', { class: 'card' },
-        el('h2', null, '取り込み元（接続デバイス）を選ぶ'),
+        el('div', { class: 'row', style: { alignItems: 'center', marginBottom: '8px' } },
+          el('h2', { style: { flex: 1, margin: 0 } }, '取り込み元一覧', sourceCountBadge),
+        ),
         banner,
-        el('h3', null, '検出されたボリューム（' + (window.App.platform === 'darwin' ? '/Volumes' : 'ドライブ') + '）'),
-        el('div', { class: 'row', style: { marginBottom: '8px' } }, reloadBtn, chooseBtn),
-        elVolumes,
-      ),
-      el('div', { class: 'card' },
-        el('h2', null, '取り込み元一覧（' + state.sources.length + '）'),
         elList,
         el('div', { class: 'actions between' },
           el('button', { class: 'ghost', onclick: () => state.goto('patient') }, '← 患者情報へ'),
           el('button', { class: 'primary', onclick: onNext }, '次へ：プレビュー →'),
         ),
       ),
+      // 2. 下部: 検出されたボリューム（追加候補）
+      el('div', { class: 'card' },
+        el('h2', null, '＋ 検出されたボリューム（' + (window.App.platform === 'darwin' ? '/Volumes' : 'ドライブ') + '）'),
+        el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)', marginBottom: '8px' } },
+          '使いたいデバイスを「取り込み元に追加」してください。'),
+        el('div', { class: 'row', style: { marginBottom: '8px' } }, reloadBtn, chooseBtn),
+        elVolumes,
+      ),
     );
 
     mount.replaceChildren(root);
     renderSources();
     loadVolumes();
+
+    // renderSources 呼出毎にバッジ件数を更新
+    const obs = new MutationObserver(() => {
+      sourceCountBadge.textContent = `(${state.sources.length})`;
+    });
+    obs.observe(elList, { childList: true });
   }
 
   return { render };
