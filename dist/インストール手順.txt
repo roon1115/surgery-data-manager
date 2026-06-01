@@ -1,19 +1,15 @@
 手術データ管理アプリ — インストール手順
 =========================================
 
-【1. ダウンロード／インストールするDMGの選択】
+【1. ダウンロード／インストール】
 
-  Apple Silicon Mac (M1/M2/M3/M4): SurgeryDataManager-0.2.0-arm64.dmg
-  Intel Mac:                       SurgeryDataManager-0.2.0-x64.dmg
+  SurgeryDataManager-0.3.15-universal.dmg（Apple Silicon / Intel 共通）
 
   ◆ 公式配信URL（GitHub Releases）:
     https://github.com/roon1115/surgery-data-manager/releases/latest
 
-  Dropbox配下にも同じDMGを配置しています:
-    手術データ管理アプリ/dist/
-
-  対象Macが Apple Silicon か Intel かは、「このMacについて」→「チップ」で確認できます。
-  わからない場合は両方を試してください（誤った方は起動できないだけで害はありません）。
+  universal ビルドのため、Apple Silicon / Intel どちらの Mac でも同じ DMG で
+  動作します。チップの種類を気にする必要はありません。
 
 
 【2. インストール手順】
@@ -23,28 +19,11 @@
   3. DMG をアンマウント（取り出し）
 
 
-【3. 初回起動時の注意（重要）】
+【3. 初回起動】
 
-  このアプリには Apple Developer ID 署名がないため、初回起動時に macOS の
-  Gatekeeper が「開発元を確認できません」というダイアログを表示します。
-
-  以下のいずれかの方法で起動してください:
-
-  ▼ 方法A（推奨）: ターミナルで quarantine 属性を削除してから起動
-  ──────────────────────────────────────
-    ターミナル.app を開き、以下を実行:
-
-      xattr -dr com.apple.quarantine /Applications/手術データ管理.app
-
-    その後、通常通りアプリケーションフォルダから起動できます。
-
-  ▼ 方法B: 右クリックメニューから「開く」
-  ──────────────────────────────────────
-    1. アプリケーションフォルダ内の「手術データ管理.app」を右クリック
-       （または control+クリック）
-    2. メニューから「開く」を選択
-    3. 警告ダイアログで再度「開く」をクリック
-    4. 2回目以降は普通にダブルクリックで起動できます
+  v0.2.1 以降は Developer ID 署名＋Apple 公証済みのため、
+  Gatekeeper の警告なしでそのまま起動できます。
+  xattr 操作も不要です。
 
 
 【4. 初回設定】
@@ -60,9 +39,6 @@
       - Called AE Title:  StellaDICOM の設定値
       - Host:             stelladicom.local または IP アドレス
       - Port:             104（既定）
-
-  ・アップデート確認URL（任意）
-      latest.json を配信するURLを指定（後述「自動アップデートの運用」参照）
 
   「C-ECHO で疎通確認」ボタンで接続テストができます。
 
@@ -91,39 +67,47 @@
       の形式で保存
 
 
-【7. 自動アップデートの運用（運用担当者向け）】
+【7. 自動アップデートの仕組みと運用（運用担当者向け）】
 
-  ◆ 仕組み:
-    起動時に「アップデート確認URL」（設定画面で指定）から latest.json を取得し、
-    現バージョンと比較。新版があればダイアログでユーザーに通知し、
-    ブラウザで DMG ダウンロードを開く。
+  ◆ 仕組み（v0.3.15 以降）:
+    electron-updater による完全自動アップデート。
+    アプリ起動の約3秒後に GitHub Releases を自動チェックし、新版があれば
+    バックグラウンドで自動ダウンロードする。完了すると「今すぐ再起動して
+    適用」ダイアログが表示され、クリックするだけで更新が完了する。
+    （「次回起動時に適用」を選ぶと、次にアプリを終了したとき自動適用）
+    メニュー「アップデートを確認…」や設定画面のボタンから手動チェックも可能。
+    ユーザーがブラウザで DMG を手動ダウンロードする必要はもうない。
 
   ◆ 配信担当者の手順（新版リリース時）:
 
-    1. アプリのバージョンを上げてビルド（version: "0.3.0" → 新DMGを作成）
+    1. package.json の "version" を上げる（例: 0.3.15 → 0.3.16）
 
-    2. 新DMG を公開可能な場所にアップロード:
-       - Dropbox: ファイル右クリック → リンクをコピー → URL末尾を ?dl=0 → ?dl=1
-       - GitHub Releases: タグを作成して DMG をアップロード
-       - その他の HTTP/HTTPS サーバー
+    2. GitHub アクセストークンを環境変数にセット（repo スコープ）:
+         export GH_TOKEN=ghp_xxxxxxxx
 
-    3. latest.json を更新（dist/latest.json.sample を参考に編集）して、
-       同じく公開URLに置く:
+    3. ビルド＆公開（署名・公証・GitHub Releases へのアップロードまで一括）:
+         npm run electron:publish
 
-       {
-         "version": "0.3.0",
-         "pubDate": "2026-06-01",
-         "notes": "変更点の説明",
-         "url":    "https://.../手術データ管理-0.3.0-arm64.dmg",
-         "urlX64": "https://.../手術データ管理-0.3.0.dmg"
-       }
+       → Developer ID 署名 → Apple 公証（notarytool / keychain プロファイル
+         "vetcalc-notary"）→ universal の dmg・zip・latest-mac.yml を生成し、
+         GitHub Releases（タグ v0.3.16）へ自動アップロードする。
 
-    4. アプリ側の「アップデート確認URL」が latest.json を指していれば、
-       ユーザーは次回起動時（または設定画面の「今すぐ確認」）で通知を受け取る。
+    4. 公開を確認:
+         gh release view v0.3.16 --repo roon1115/surgery-data-manager
+
+       assets に dmg / zip / latest-mac.yml の3点が揃えば成功。
+       ※ latest-mac.yml が無いと自動更新は配信されないので必ず確認すること。
 
   ◆ ユーザー側の更新手順:
-    通知ダイアログ → 「ブラウザでダウンロードを開く」 → DMG が落ちる
-    → /Applications に上書きコピー → アプリ再起動
+    通常は何もしなくてよい。起動時に自動チェック → 自動ダウンロード →
+    「今すぐ再起動して適用」ダイアログ → 再起動で完了。
+
+  ◆ 重要な移行注意（v0.3.15）:
+    v0.3.15 は electron-updater を初めて搭載したバージョン。これ以前
+    （v0.3.14 まで）のアプリには自動更新の仕組みが無いため、v0.3.15 への
+    更新だけは全端末で手動インストールが必要（GitHub Releases の universal
+    DMG を /Applications に上書きコピー）。これが最後の手動更新で、
+    v0.3.15 以降は自動で更新される。
 
 
 【8. アンインストール】
@@ -132,7 +116,9 @@
   ・必要に応じて ~/Library/Application Support/surgery-data-manager/ も削除
 
 
-バージョン: 0.2.0
-ビルド日: 2026-05-18
-変更点（0.1.0 → 0.2.0）:
-  + 自動アップデート機能を追加（起動時チェック・メニューから手動チェック）
+バージョン: 0.3.15
+ビルド日: 2026-06-02
+変更点（0.3.14 → 0.3.15）:
+  + 自動アップデートを electron-updater 方式に刷新
+    （起動時に GitHub Releases を自動チェック → zip を自動DL → 再起動で適用）
+  ※ 本版のみ手動インストールが必要。以降は自動で更新される。

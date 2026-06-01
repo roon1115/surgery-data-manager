@@ -131,7 +131,7 @@ function buildMenu() {
       label: app.name,
       submenu: [
         { role: 'about' },
-        { label: 'アップデートを確認…', click: () => updater.checkForUpdate({ silent: false }) },
+        { label: 'アップデートを確認…', click: () => updater.manualCheckWithDialog() },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -144,7 +144,7 @@ function buildMenu() {
       label: 'ファイル',
       submenu: [
         ...(!isMac ? [
-          { label: 'アップデートを確認…', click: () => updater.checkForUpdate({ silent: false }) },
+          { label: 'アップデートを確認…', click: () => updater.manualCheckWithDialog() },
           { type: 'separator' },
         ] : []),
         isMac ? { role: 'close' } : { role: 'quit' },

@@ -1,6 +1,6 @@
 {
   "name": "surgery-data-manager",
-  "version": "0.3.14",
+  "version": "0.3.15",
   "description": "手術データ管理アプリ — 記録媒体からの差分インポートとDICOM送信",
   "main": "electron/main.js",
   "private": true,
@@ -12,6 +12,8 @@
     "build:mac": "electron-builder --mac --arm64 --x64",
     "build:mac:arm64": "electron-builder --mac --arm64",
     "build:mac:x64": "electron-builder --mac --x64",
+    "electron:dist": "electron-builder --mac --publish never",
+    "electron:publish": "electron-builder --mac --publish always",
     "rebuild": "electron-rebuild"
   },
   "devDependencies": {
@@ -23,6 +25,7 @@
   "dependencies": {
     "dcmjs-dimse": "^0.3.3",
     "electron-store": "^8.2.0",
+    "electron-updater": "^6.8.3",
     "heic-convert": "^2.1.0",
     "sanitize-filename": "^1.6.3",
     "wanakana": "^5.3.1"
@@ -54,8 +57,13 @@
         {
           "target": "dmg",
           "arch": [
-            "arm64",
-            "x64"
+            "universal"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "universal"
           ]
         }
       ],
@@ -67,6 +75,12 @@
     },
     "dmg": {
       "writeUpdateInfo": false
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "roon1115",
+      "repo": "surgery-data-manager",
+      "releaseType": "release"
     }
   }
 }
