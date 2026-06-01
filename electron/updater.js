@@ -1,193 +1,155 @@
 /**
- * 軽量カスタムアップデーター
+ * 自動アップデート（electron-updater）
  *
- * 動作:
- *   1. 設定された URL から latest.json を取得
- *      期待フォーマット:
- *        {
- *          "version": "0.2.0",
- *          "notes":   "変更点の説明...",
- *          "url":     "https://.../手術データ管理-0.2.0-arm64.dmg",
- *          "urlX64":  "https://.../手術データ管理-0.2.0.dmg",
- *          "pubDate": "2026-05-18"
- *        }
- *   2. アプリ現バージョンと比較
- *   3. 新版があればダイアログ → ユーザーが「ダウンロード」をクリックすると
- *      既定ブラウザで DMG URL を開く（手動インストール）
+ * VetCalc と同方式:
+ *   - electron-builder の publish 設定 (package.json build.publish: github) を見て
+ *     ビルド時に latest-mac.yml / *.zip / *.dmg を GitHub Releases にアップロード
+ *   - アプリは起動時に latest-mac.yml をチェック → 新版があれば zip を自動ダウンロード
+ *   - ダウンロード完了で「今すぐ再起動して適用」ダイアログ → quitAndInstall()
+ *   - 完全自動なので、ユーザーが毎回ブラウザで DMG をダウンロードする必要はない
  *
- * Ad-hoc 署名のため electron-updater による完全自動インストールは行わない。
+ * 開発時 (app.isPackaged === false) は electron-updater を動かさない。
  */
-const { app, dialog, shell, ipcMain, BrowserWindow } = require('electron');
-const https = require('https');
-const http = require('http');
+const { app, dialog, ipcMain, BrowserWindow } = require('electron');
 
-const isMac = process.platform === 'darwin';
-const arch = process.arch; // 'arm64' | 'x64'
-
-// アップデート確認URLは固定（GitHub Releases）。ユーザー設定からは変更不可。
-const UPDATE_URL = 'https://github.com/roon1115/surgery-data-manager/releases/latest/download/latest.json';
-
-function compareSemver(a, b) {
-  const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
-  const pb = String(b || '0').split('.').map(n => parseInt(n, 10) || 0);
-  const len = Math.max(pa.length, pb.length);
-  for (let i = 0; i < len; i++) {
-    const da = pa[i] || 0;
-    const db = pb[i] || 0;
-    if (da > db) return 1;
-    if (da < db) return -1;
-  }
-  return 0;
+let autoUpdater = null;
+try {
+  ({ autoUpdater } = require('electron-updater'));
+} catch (_) {
+  autoUpdater = null;
 }
 
-function fetchJson(url, { timeoutMs = 10000 } = {}) {
-  return new Promise((resolve, reject) => {
-    if (!url || !/^https?:\/\//i.test(url)) {
-      reject(new Error('invalid URL'));
-      return;
-    }
-    const lib = url.startsWith('https:') ? https : http;
-    const req = lib.get(url, { headers: { 'User-Agent': 'SurgeryDataManager-Updater' } }, (res) => {
-      // リダイレクト追従
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume();
-        fetchJson(res.headers.location, { timeoutMs }).then(resolve).catch(reject);
-        return;
-      }
-      if (res.statusCode !== 200) {
-        res.resume();
-        reject(new Error(`HTTP ${res.statusCode}`));
-        return;
-      }
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk) => { body += chunk; if (body.length > 1024 * 1024) req.destroy(); });
-      res.on('end', () => {
-        try { resolve(JSON.parse(body)); } catch (e) { reject(new Error('JSON parse: ' + e.message)); }
-      });
-    });
-    req.on('error', reject);
-    req.setTimeout(timeoutMs, () => { req.destroy(new Error('timeout')); });
+function mainWin() {
+  return BrowserWindow.getAllWindows()[0] || null;
+}
+
+let updateDownloaded = false;
+let latestKnownVersion = null;
+
+function setupAutoUpdater() {
+  if (!autoUpdater) return;
+  if (!app.isPackaged) return; // 開発時はスキップ
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('update-available', (info) => {
+    latestKnownVersion = info?.version || null;
+    console.log('[updater] update available:', info?.version);
   });
-}
 
-function pickDmgUrl(manifest) {
-  if (!manifest) return null;
-  if (arch === 'arm64' && manifest.url) return manifest.url;
-  if (arch === 'x64' && manifest.urlX64) return manifest.urlX64;
-  return manifest.url || manifest.urlX64 || null;
-}
+  autoUpdater.on('update-not-available', () => {
+    console.log('[updater] up to date');
+  });
 
-async function checkForUpdate({ silent = false, dryRun = false } = {}) {
-  // silent: 「最新です」「エラー」などの情報ダイアログは出さない（起動時の静かなチェック用）。
-  //         ただし新版が見つかった場合は通知ダイアログを出す。
-  // dryRun: いかなるダイアログも出さない（テスト・プログラマティック呼出し用）。
-  if (dryRun) silent = true;
-  const url = UPDATE_URL;
-  const currentVersion = app.getVersion();
+  autoUpdater.on('download-progress', (p) => {
+    console.log(`[updater] downloading ${Math.round(p.percent)}%`);
+  });
 
-  let manifest;
-  try {
-    manifest = await fetchJson(url);
-  } catch (e) {
-    if (!silent) {
-      dialog.showMessageBox({
-        type: 'error',
-        title: 'アップデート確認失敗',
-        message: 'アップデート情報の取得に失敗しました。',
-        detail: String(e?.message || e),
-      });
+  autoUpdater.on('update-downloaded', (info) => {
+    updateDownloaded = true;
+    const choice = dialog.showMessageBoxSync(mainWin(), {
+      type: 'info',
+      buttons: ['今すぐ再起動して適用', '次回起動時に適用'],
+      defaultId: 0,
+      cancelId: 1,
+      title: 'アップデート',
+      message: `新しいバージョン v${info?.version} をダウンロードしました`,
+      detail: '今すぐ再起動して新バージョンを適用しますか？\n（「次回起動時に適用」を選ぶと、アプリを次に終了したとき自動的に適用されます）',
+    });
+    if (choice === 0) {
+      setImmediate(() => autoUpdater.quitAndInstall());
     }
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.warn('[updater] error:', err?.message || err);
+  });
+
+  // 起動 3 秒後に静かにチェック（新版があれば自動DL→update-downloaded で再起動確認）
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch(err => {
+      console.warn('[updater] checkForUpdates failed:', err?.message || err);
+    });
+  }, 3000);
+}
+
+// 手動チェック（メニュー / 設定画面の「今すぐアップデートを確認」ボタンから）
+async function manualCheck() {
+  if (!autoUpdater || !app.isPackaged) {
+    return { ok: false, dev: true, error: '開発モードではアップデートチェックは無効です（パッケージ版で動作します）。' };
+  }
+  if (updateDownloaded) {
+    return { ok: true, hasUpdate: true, downloaded: true, latestVersion: latestKnownVersion, currentVersion: app.getVersion() };
+  }
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    const latest = result?.updateInfo?.version;
+    const current = app.getVersion();
+    const hasUpdate = !!latest && latest !== current;
+    return { ok: true, hasUpdate, latestVersion: latest || current, currentVersion: current };
+  } catch (e) {
     return { ok: false, error: String(e?.message || e) };
   }
+}
 
-  const latestVersion = manifest.version;
-  if (!latestVersion) {
-    if (!silent) {
-      dialog.showMessageBox({
-        type: 'error',
-        title: 'アップデート確認失敗',
-        message: 'latest.json に version フィールドがありません。',
-      });
-    }
-    return { ok: false, error: 'invalid manifest' };
-  }
-
-  const cmp = compareSemver(latestVersion, currentVersion);
-  if (cmp <= 0) {
-    if (!silent) {
-      dialog.showMessageBox({
-        type: 'info',
-        title: 'アップデート確認',
-        message: '最新版を使用中です。',
-        detail: `現在のバージョン: ${currentVersion}`,
-      });
-    }
-    return { ok: true, hasUpdate: false, currentVersion, latestVersion };
-  }
-
-  const dmgUrl = pickDmgUrl(manifest);
-  if (!dmgUrl) {
-    if (!silent) {
-      dialog.showMessageBox({
-        type: 'warning',
-        title: 'ダウンロードURL未設定',
-        message: `新版 ${latestVersion} が利用可能ですが、ダウンロードURLが見つかりません。`,
-        detail: 'latest.json の url / urlX64 フィールドを確認してください。',
-      });
-    }
-    return { ok: true, hasUpdate: true, latestVersion, currentVersion, dmgUrl: null };
-  }
-
-  if (dryRun) {
-    return { ok: true, hasUpdate: true, latestVersion, currentVersion, dmgUrl };
-  }
-
-  const choice = await dialog.showMessageBox({
-    type: 'info',
-    title: 'アップデートが利用可能',
-    message: `新しいバージョン ${latestVersion} が公開されました`,
-    detail:
-      `現在: ${currentVersion}\n最新: ${latestVersion}\n` +
-      (manifest.notes ? `\n変更点:\n${manifest.notes}\n` : '') +
-      (manifest.pubDate ? `\n公開日: ${manifest.pubDate}` : ''),
-    buttons: ['ブラウザでダウンロードを開く', '今は更新しない'],
-    defaultId: 0,
-    cancelId: 1,
-  });
-  if (choice.response === 0) {
-    await shell.openExternal(dmgUrl);
-    dialog.showMessageBox({
+// メニューから呼ばれる: ダイアログ付きの手動チェック
+async function manualCheckWithDialog() {
+  const win = mainWin();
+  if (!autoUpdater || !app.isPackaged) {
+    dialog.showMessageBox(win, {
       type: 'info',
-      title: 'ダウンロード開始',
-      message: 'DMGファイルのダウンロードを開始しました',
-      detail:
-        '1. ダウンロード完了後、DMGを開く\n' +
-        '2. アプリを /Applications にドラッグしてコピー（上書き）\n' +
-        '3. このアプリを終了 → /Applications から新バージョンを起動\n\n' +
-        '※ 初回のみ右クリック→「開く」が必要な場合があります。',
+      message: '開発モードではアップデートチェックは無効です。',
+      detail: 'パッケージ版（.app）から実行してください。',
     });
-  }
-  return { ok: true, hasUpdate: true, latestVersion, currentVersion, dmgUrl };
-}
-
-ipcMain.handle('updater:check', async (_e, args = {}) => {
-  return await checkForUpdate({ silent: !!args.silent, dryRun: !!args.dryRun });
-});
-
-// 起動時にサイレントチェック
-function scheduleStartupCheck() {
-  setTimeout(() => {
-    checkForUpdate({ silent: false }).catch(() => {});
-  }, 5000); // 起動5秒後
-}
-
-app.whenReady().then(() => {
-  if (!app.isPackaged && !process.env.SDM_TEST_UPDATER) {
-    // 開発モードではスキップ（SDM_TEST_UPDATER=1 で強制有効化可）
     return;
   }
-  scheduleStartupCheck();
+  if (updateDownloaded) {
+    const choice = dialog.showMessageBoxSync(win, {
+      type: 'info',
+      buttons: ['今すぐ再起動して適用', '後で'],
+      defaultId: 0, cancelId: 1,
+      title: 'アップデート',
+      message: `v${latestKnownVersion} はダウンロード済みです`,
+      detail: '再起動して適用しますか？',
+    });
+    if (choice === 0) setImmediate(() => autoUpdater.quitAndInstall());
+    return;
+  }
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    const latest = result?.updateInfo?.version;
+    const current = app.getVersion();
+    if (!latest || latest === current) {
+      dialog.showMessageBox(win, {
+        type: 'info',
+        title: 'Surgery Data Manager',
+        message: '最新版です。',
+        detail: `現在のバージョン: ${current}`,
+      });
+    } else {
+      dialog.showMessageBox(win, {
+        type: 'info',
+        title: 'アップデート',
+        message: `新しいバージョン v${latest} が見つかりました`,
+        detail: 'バックグラウンドでダウンロードしています。完了したら再起動の確認が表示されます。',
+      });
+    }
+  } catch (e) {
+    dialog.showMessageBox(win, {
+      type: 'error',
+      title: 'アップデート確認エラー',
+      message: 'アップデート情報を取得できませんでした。',
+      detail: String(e?.message || e),
+    });
+  }
+}
+
+// 設定画面の「今すぐアップデートを確認」ボタン用 IPC（ダイアログなしで結果を返す）
+ipcMain.handle('updater:check', async () => manualCheck());
+
+app.whenReady().then(() => {
+  setupAutoUpdater();
 });
 
-module.exports = { checkForUpdate, compareSemver };
+module.exports = { manualCheckWithDialog };
