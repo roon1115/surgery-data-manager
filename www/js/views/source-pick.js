@@ -185,22 +185,8 @@ window.Views.source = (function() {
 
     const reloadBtn = el('button', { class: 'ghost', onclick: loadVolumes }, '再読み込み');
 
-    const onNext = async () => {
-      if (state.sources.length === 0) {
-        U.modal({ title: 'ソース未選択', body: '取り込み元を1つ以上追加してください。' });
-        return;
-      }
-      const missingType = state.sources.find(s => !s.type);
-      if (missingType) {
-        U.modal({ title: '種別未選択', body: `「${missingType.name}」の種別を選択してください。` });
-        return;
-      }
-      const totalFiles = state.sources.reduce((s, src) => s + (src.files?.length || 0), 0);
-      if (totalFiles === 0) {
-        U.modal({ title: 'ファイルなし', body: '選択されたソースに取り込み可能なファイルがありません。' });
-        return;
-      }
-
+    // 重複チェック → プレビュー遷移（種別確認ポップアップで「OK」後に呼ばれる）
+    const proceedToCheck = async () => {
       // 差分インポート有効なソースは事前ハッシュチェックして重複ファイルにフラグ
       // → preview で既定除外 → 不要なプレビュー操作を省く
       const filesToCheck = [];
@@ -267,6 +253,60 @@ window.Views.source = (function() {
       m.classList.add('hidden');
 
       state.goto('preview');
+    };
+
+    // 「次へ」: バリデーション → データ種別の最終確認ポップアップ → proceedToCheck
+    const onNext = () => {
+      if (state.sources.length === 0) {
+        U.modal({ title: 'ソース未選択', body: '取り込み元を1つ以上追加してください。' });
+        return;
+      }
+      const missingType = state.sources.find(s => !s.type);
+      if (missingType) {
+        U.modal({ title: '種別未選択', body: `「${missingType.name}」の種別を選択してください。` });
+        return;
+      }
+      const totalFiles = state.sources.reduce((s, src) => s + (src.files?.length || 0), 0);
+      if (totalFiles === 0) {
+        U.modal({ title: 'ファイルなし', body: '選択されたソースに取り込み可能なファイルがありません。' });
+        return;
+      }
+
+      // 各ソースの種別を一覧表示して最終確認
+      const labelOf = (key) => {
+        const opt = ALL_TYPE_OPTIONS.find(o => o.key === key);
+        return opt ? opt.label : key;
+      };
+      const deleteAfterCopy = cfg.deleteAfterCopy || {};
+      const listEl = el('ul', { style: { paddingLeft: '18px', margin: '8px 0', lineHeight: '1.9' } },
+        ...state.sources.map(src => {
+          const willDelete = deleteAfterCopy[src.type] === true;
+          return el('li', null,
+            el('span', { style: { color: 'var(--fg-mute)' } }, src.name),
+            ' → ',
+            el('strong', { style: { color: 'var(--accent)' } }, labelOf(src.type)),
+            el('span', { style: { fontSize: '11px', color: 'var(--fg-mute)' } },
+              `（${src.files?.length || 0} ファイル）`),
+            willDelete
+              ? el('span', { style: { marginLeft: '6px', color: 'var(--err)', fontSize: '11px' } },
+                  '🗑 コピー後に元削除')
+              : null,
+          );
+        }),
+      );
+      const body = el('div', null,
+        el('p', { style: { marginBottom: '4px' } }, '以下のデータ種別で取り込みます。よろしいですか？'),
+        listEl,
+        el('p', { style: { fontSize: '12px', color: 'var(--fg-mute)' } },
+          '種別が違う場合は「戻って修正」を押し、各ソースの種別を選び直してください。'),
+      );
+      U.modal({
+        title: 'データ種別の確認',
+        body,
+        okText: 'この種別で取り込む',
+        cancelText: '戻って修正',
+        onOk: () => { proceedToCheck(); },
+      });
     };
 
     // 取り込み元数バッジ（renderSources 呼出時に MutationObserver で自動更新）
