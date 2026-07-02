@@ -86,7 +86,7 @@ window.Views.ingest = (function() {
       el('div', { class: 'stat' }, el('div', { class: 'num', id: 'st-copied' }, '0'), el('div', { class: 'label' }, 'コピー済')),
       el('div', { class: 'stat' }, el('div', { class: 'num', id: 'st-skip' }, '0'), el('div', { class: 'label' }, 'スキップ')),
       el('div', { class: 'stat' }, el('div', { class: 'num', id: 'st-fail' }, '0'), el('div', { class: 'label' }, '失敗')),
-      el('div', { class: 'stat' }, el('div', { class: 'num', id: 'st-bytes' }, '0 B'), el('div', { class: 'label' }, '転送量')),
+      el('div', { class: 'stat' }, el('div', { class: 'num', id: 'st-bytes' }, '0 B'), el('div', { class: 'label' }, '処理済')),
     );
 
     function logLine(text, cls) {
@@ -160,12 +160,36 @@ window.Views.ingest = (function() {
     }
 
     // 3. 進捗購読
+    // v0.3.16: コピーは並列実行されるため、ファイル index ではなく完了数で進捗表示する
+    let totalFiles = 0;
+    let processedCount = 0; // done + skip + fail の合計
+    const countedIdx = new Set(); // 同一ファイルが複数イベントを出しても1回だけ数える
+    const inFlightNames = new Map(); // index -> name（並列コピー中のファイル名表示用）
+    const countOnce = (idx) => {
+      if (idx != null && countedIdx.has(idx)) return;
+      if (idx != null) countedIdx.add(idx);
+      processedCount++;
+    };
+    const updateStatus = () => {
+      const names = [...inFlightNames.values()];
+      let suffix = '';
+      if (names.length > 0) {
+        const shown = names.slice(0, 2).join(', ');
+        suffix = ` — コピー中: ${shown}` + (names.length > 2 ? ` ほか${names.length - 2}件` : '');
+      }
+      elStatus.textContent = `${processedCount} / ${totalFiles} ファイル完了${suffix}`;
+    };
     const off = window.App.ingest.onProgress((data) => {
       if (data.type === 'start') {
+        totalFiles = data.total;
         elStatus.textContent = `0 / ${data.total} ファイル（${U.formatBytes(data.totalBytes)}）`;
       } else if (data.type === 'file-start') {
-        elStatus.textContent = `${data.index + 1} / ${data.total}: ${data.name}`;
+        inFlightNames.set(data.index, data.name);
+        updateStatus();
       } else if (data.type === 'file-done') {
+        countOnce(data.index);
+        inFlightNames.delete(data.index);
+        updateStatus();
         logLine('✓ ' + data.name, 'ok');
         document.getElementById('st-copied').textContent = String((parseInt(document.getElementById('st-copied').textContent, 10) || 0) + 1);
         document.getElementById('st-bytes').textContent = U.formatBytes(data.bytes);
@@ -173,13 +197,30 @@ window.Views.ingest = (function() {
           elProgress.firstElementChild.style.width = ((data.bytes / data.totalBytes) * 100).toFixed(1) + '%';
         }
       } else if (data.type === 'file-skip') {
-        logLine('⊘ ' + data.name + '（' + data.reason + '）', 'skip');
+        countOnce(data.index);
+        inFlightNames.delete(data.index);
+        updateStatus();
+        logLine('⊘ ' + data.name + '（' + (data.reason === 'duplicate' ? '重複' : data.reason) + '）', 'skip');
         document.getElementById('st-skip').textContent = String((parseInt(document.getElementById('st-skip').textContent, 10) || 0) + 1);
+        if (data.totalBytes > 0 && data.bytes != null) {
+          elProgress.firstElementChild.style.width = ((data.bytes / data.totalBytes) * 100).toFixed(1) + '%';
+        }
       } else if (data.type === 'file-fail') {
+        countOnce(data.index);
+        inFlightNames.delete(data.index);
+        updateStatus();
         logLine('✗ ' + data.name + ' — ' + data.error, 'err');
         document.getElementById('st-fail').textContent = String((parseInt(document.getElementById('st-fail').textContent, 10) || 0) + 1);
+        if (data.totalBytes > 0 && data.bytes != null) {
+          elProgress.firstElementChild.style.width = ((data.bytes / data.totalBytes) * 100).toFixed(1) + '%';
+        }
+      } else if (data.type === 'file-warn') {
+        // 警告（削除見送り等）: コピー/スキップ自体は成功しているので失敗カウンタは増やさない
+        logLine('⚠ ' + data.name + ' — ' + data.error, 'warn');
       } else if (data.type === 'file-deleted') {
         logLine('🗑 元データ削除: ' + data.name, 'warn');
+      } else if (data.type === 'dirs-cleaned') {
+        logLine(`🗂 空になったソースフォルダを ${data.removedDirs} 件削除`, 'warn');
       } else if (data.type === 'done') {
         const delPart = data.deleted ? ` / 削除 ${data.deleted}` : '';
         if (data.cancelled) {
@@ -187,7 +228,7 @@ window.Views.ingest = (function() {
           logLine('ユーザー操作により中断されました', 'warn');
         } else {
           elStatus.textContent = `完了: コピー ${data.copied} / スキップ ${data.skippedDup} / 失敗 ${data.failed}${delPart}`;
-          if (data.deleted) logLine(`元データを ${data.deleted} 件削除（削除前リチェック実施済）`, 'warn');
+          if (data.deleted) logLine(`元データを ${data.deleted} 件削除（二重ハッシュ照合＋削除前検証済み）`, 'warn');
           elProgress.firstElementChild.style.width = '100%';
         }
       }
@@ -206,10 +247,20 @@ window.Views.ingest = (function() {
 
     state.ingestResult = result;
 
-    if (result.failed > 0) {
-      logLine(`失敗 ${result.failed} 件あり。下記参照:`, 'err');
-      for (const f of (result.failures || [])) {
+    // 失敗（コピーできなかったもの）と警告（コピー/スキップは成功したが削除を見送ったもの等）を分けて表示。
+    // 警告は failed=0 でも必ず表示する（元データが残る理由をユーザーに見せる）。
+    const failList = result.failures || [];
+    if (failList.length > 0) {
+      logLine(`失敗 ${failList.length} 件。下記参照:`, 'err');
+      for (const f of failList) {
         logLine('  - ' + f.file + ': ' + f.error, 'err');
+      }
+    }
+    const warnList = result.warnings || [];
+    if (warnList.length > 0) {
+      logLine(`警告 ${warnList.length} 件（コピー/スキップは成功。元データの削除を見送った項目など）:`, 'warn');
+      for (const w of warnList) {
+        logLine('  - ' + w.file + ': ' + w.error, 'warn');
       }
     }
 

@@ -91,6 +91,7 @@ async function run(win) {
           skippedDup: 1,
           failed: 0,
           deleted: 1,
+          removedDirs: 1,
           dicomCandidates: [
             { path: '/Volumes/Stella_8TB/手術写真/2026-05-22_P0001_モモ_去勢術/IMG_0001.jpg', name: 'IMG_0001.jpg' },
             { path: '/Volumes/Stella_8TB/手術写真/2026-05-22_P0001_モモ_去勢術/IMG_0002.jpg', name: 'IMG_0002.jpg' },
