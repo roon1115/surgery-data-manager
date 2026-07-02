@@ -103,13 +103,20 @@ window.Views.preview = (function() {
         }
         const destPath = targetPathFor(src.type);
         const dupCount = src.files.filter(f => f.alreadyImported).length;
+        // 「除外済み」表示は実際の選択状態ベース（既取込でも再選択されていれば除外扱いしない）
+        const dupExcludedCount = src.files.filter(f => f.alreadyImported && !f.selected).length;
         const selectedCount = src.files.filter(f => f.selected).length;
         const totalCount = src.files.length;
         const selectedBytes = src.files.filter(f => f.selected).reduce((a, b) => a + (b.size || 0), 0);
 
         // ソース内の一括選択/解除
+        // 全選択は「画面に表示されているファイル」のみを対象にする。
+        // 非表示の既取込ファイルまで不可視のまま選択すると、削除ON種別で
+        // ユーザーが気づかないうちに元データ削除の対象に入ってしまうため。
         const allOnBtn = el('button', { class: 'ghost', onclick: () => {
-          src.files.forEach(f => f.selected = true);
+          src.files.forEach(f => {
+            if (state.showAlreadyImported || !f.alreadyImported) f.selected = true;
+          });
           renderSources(); renderSummary();
         }}, '全選択');
         const allOffBtn = el('button', { class: 'ghost', onclick: () => {
@@ -192,9 +199,13 @@ window.Views.preview = (function() {
           el('div', { class: 'row', style: { alignItems: 'center', marginBottom: '8px' } },
             el('div', { style: { flex: '1', fontSize: '12px' } },
               `選択: ${selectedCount} / ${totalCount} ファイル（${formatBytes(selectedBytes)}）`,
-              dupCount > 0
+              dupExcludedCount > 0
                 ? el('span', { style: { marginLeft: '8px', color: 'var(--fg-mute)' } },
-                    `／ うち既取込 ${dupCount} 件は除外済み`)
+                    `／ うち既取込 ${dupExcludedCount} 件は除外済み`)
+                : null,
+              (dupCount - dupExcludedCount) > 0
+                ? el('span', { style: { marginLeft: '8px', color: 'var(--warn, #f59e0b)' } },
+                    `／ ⚠ 既取込 ${dupCount - dupExcludedCount} 件が選択中`)
                 : null,
             ),
             allOnBtn, allOffBtn, toggleBtn,
@@ -240,7 +251,10 @@ window.Views.preview = (function() {
               anesthesia: '麻酔モニター記録', surgicalPhoto: '手術写真',
               laparoscope: '腹腔鏡', bronchoscope: '気管支鏡', endoscope: '内視鏡',
             })[t] || t).join('、'),
-            ' のソースは、コピー＆ハッシュ照合成功後に元ファイルが削除されます。削除前にもう一度ハッシュをリチェックします。'),
+            ' のソースは、コピー中と書き込み後の二重ハッシュ照合に成功した場合のみ元ファイルが削除されます'
+            + '（削除直前にもファイル変更がないことを確認）。取り込み済み（重複）と判定されたファイルは、'
+            + '同じ患者・種別の既存コピーの実在と内容一致を確認できた場合のみ削除されます。'
+            + '空になった取り込み元フォルダは症例フォルダごと自動削除されます。'),
         )
       : null;
 

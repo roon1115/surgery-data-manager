@@ -48,16 +48,56 @@ function init() {
     jsonPath = path.join(dir, 'ingest.json');
     try {
       jsonFallback = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
-    } catch (_) {
+    } catch (e) {
+      // ファイルが存在するのに parse に失敗 → 破損。無言で空 DB 上書きせず退避してから初期化
+      if (fs.existsSync(jsonPath)) {
+        try {
+          const bak = jsonPath + '.corrupt-' + Date.now() + '.bak';
+          fs.copyFileSync(jsonPath, bak);
+          console.error('[db] ingest.json の読み込みに失敗したため退避しました:', bak, e?.message || e);
+        } catch (_) {}
+      }
       jsonFallback = { files: {}, pending_dicom: [] };
     }
   }
 }
 
+let dirty = false; // メモリ上の変更がディスク未反映なら true
+
 function persistJson() {
   if (!jsonFallback || !jsonPath) return;
-  fs.writeFileSync(jsonPath, JSON.stringify(jsonFallback));
+  // アトミック書き込み（tmp → rename）。書き込み途中のクラッシュ・電源断でも
+  // 既存の ingest.json が途中切れで破損することがない。
+  const tmp = jsonPath + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(jsonFallback));
+  fs.renameSync(tmp, jsonPath);
+  dirty = false;
 }
+
+// 高速化: 取り込み中は recordFile が大量に呼ばれるため、毎回のフル書き込みを
+// デバウンスする（300ms 以内の連続記録は1回の書き込みにまとめる）。
+// 取り込み完了時・削除直前に flush() で必ず確定させる。
+let persistTimer = null;
+function schedulePersist() {
+  if (!jsonFallback || !jsonPath) return;
+  dirty = true;
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    try { persistJson(); } catch (e) { console.error('[db] persist failed:', e?.message || e); }
+  }, 300);
+}
+
+function flush() {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  if (dirty) persistJson(); // 未反映の変更があるときだけ書く（削除のたびの無駄書き込み防止）
+}
+
+// プロセス終了時にも未書き込み分を確定
+process.on('exit', () => { try { flush(); } catch (_) {} });
 
 function hasHash(sha256) {
   init();
@@ -66,6 +106,27 @@ function hasHash(sha256) {
     return !!row;
   }
   return !!jsonFallback.files[sha256];
+}
+
+// ハッシュから既存の取り込み記録を引く（重複ファイルの既存コピー先を確認するため）。
+// 返り値は { sha256, srcPath, dstPath, size, mtime, patientId, kind } または null。
+function getByHash(sha256) {
+  init();
+  if (db) {
+    const row = db.prepare('SELECT * FROM files WHERE sha256 = ?').get(sha256);
+    if (!row) return null;
+    return {
+      sha256: row.sha256,
+      srcPath: row.src_path,
+      dstPath: row.dst_path,
+      size: row.size,
+      mtime: row.mtime,
+      patientId: row.patient_id,
+      kind: row.kind,
+    };
+  }
+  const r = jsonFallback.files[sha256];
+  return r ? { sha256, ...r } : null;
 }
 
 function recordFile({ sha256, srcPath, dstPath, size, mtime, patientId, kind }) {
@@ -80,7 +141,7 @@ function recordFile({ sha256, srcPath, dstPath, size, mtime, patientId, kind }) 
     jsonFallback.files[sha256] = {
       srcPath, dstPath, size, mtime, importedAt, patientId, kind,
     };
-    persistJson();
+    schedulePersist(); // メモリ上は即時反映（hasHash/getByHash は正しく動く）、ディスク書き込みはまとめる
   }
 }
 
@@ -122,7 +183,9 @@ function updatePendingDicom(id, { attempts, lastError, remove }) {
 module.exports = {
   init,
   hasHash,
+  getByHash,
   recordFile,
+  flush,
   queueDicom,
   listPendingDicom,
   updatePendingDicom,
