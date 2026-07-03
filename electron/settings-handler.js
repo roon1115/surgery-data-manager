@@ -40,6 +40,9 @@ const store = new Store({
       bronchoscope: false,
       endoscope: false,
     },
+    // コピー後にコピー先を読み戻してハッシュ照合するか（既定 true）。
+    // false にしても「コピー後削除」がONの種別では必ず照合する（安全側で固定）。
+    verifyAfterCopy: true,
   },
 });
 
@@ -84,6 +87,7 @@ function getAll() {
     enabledTypes,
     excludedVolumes,
     deleteAfterCopy,
+    verifyAfterCopy: store.get('verifyAfterCopy') !== false,
   };
 }
 
@@ -110,6 +114,9 @@ ipcMain.handle('settings:save', async (_e, partial = {}) => {
   if (partial.deleteAfterCopy && typeof partial.deleteAfterCopy === 'object') {
     const cur = store.get('deleteAfterCopy') || {};
     store.set('deleteAfterCopy', { ...DEFAULT_DELETE_AFTER_COPY, ...cur, ...partial.deleteAfterCopy });
+  }
+  if (typeof partial.verifyAfterCopy === 'boolean') {
+    store.set('verifyAfterCopy', partial.verifyAfterCopy);
   }
   return getAll();
 });

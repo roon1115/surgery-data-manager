@@ -98,13 +98,40 @@ window.Views.done = (function() {
     }
     renderEjectList();
 
+    // 全ボリュームを順次 eject し、成否を集計して結果モーダルを出す
+    // （結果を出さないと、失敗していても「押したから抜ける」と誤解して
+    //   物理的に抜いてしまい、書き込み中カード破損のリスクがある）
+    async function ejectAllWithResult() {
+      const results = [];
+      for (const vol of ejectables) {
+        const r = await window.App.ingest.ejectVolume(vol);
+        results.push({ vol, ...r });
+      }
+      renderEjectList();
+      const okCount = results.filter(x => x.ok || x.alreadyEjected).length;
+      const failCount = results.length - okCount;
+      const resultBody = el('div', null,
+        failCount === 0
+          ? el('p', { style: { fontSize: '16px', fontWeight: '600', color: 'var(--ok)' } }, '✓ 取り外しが完了しました。')
+          : el('p', { style: { fontSize: '16px', fontWeight: '600', color: 'var(--warn)' } }, `${okCount} 件成功、${failCount} 件失敗`),
+        failCount === 0
+          ? el('p', null, '物理的にデバイスを抜き取ってください。')
+          : el('p', null, '✗ の付いたデバイスはまだ抜かないでください（使用中の可能性があります）。'),
+        el('ul', { style: { fontSize: '12px', paddingLeft: '20px' } },
+          ...results.map(x => el('li', { style: { fontFamily: 'SF Mono, Monaco, monospace' } },
+            (x.ok || x.alreadyEjected ? '✓ ' : '✗ ') + x.vol + (x.error ? ' — ' + x.error : '')))),
+      );
+      U.modal({
+        title: failCount === 0 ? '取り外せます' : '取り外し結果',
+        body: resultBody,
+        okText: 'OK',
+        cancelText: '',
+      });
+    }
+
     const ejectAllBtn = ejectables.length > 1
-      ? el('button', { class: 'ghost', style: { marginTop: '8px' }, onclick: async () => {
-          for (const vol of ejectables) {
-            await window.App.ingest.ejectVolume(vol);
-          }
-          renderEjectList();
-        }}, '全てまとめて取り外す')
+      ? el('button', { class: 'ghost', style: { marginTop: '8px' }, onclick: ejectAllWithResult },
+          '全てまとめて取り外す')
       : null;
 
     const ejectSection = ejectables.length > 0
@@ -154,33 +181,7 @@ window.Views.done = (function() {
           body,
           okText: 'はい、取り外す',
           cancelText: '後で',
-          onOk: async () => {
-            // 順次 eject
-            const results = [];
-            for (const vol of ejectables) {
-              const r = await window.App.ingest.ejectVolume(vol);
-              results.push({ vol, ...r });
-            }
-            renderEjectList();
-            // 結果モーダル
-            const okCount = results.filter(x => x.ok || x.alreadyEjected).length;
-            const failCount = results.length - okCount;
-            const resultBody = el('div', null,
-              failCount === 0
-                ? el('p', { style: { fontSize: '16px', fontWeight: '600', color: 'var(--ok)' } }, '✓ 取り外しが完了しました。')
-                : el('p', { style: { fontSize: '16px', fontWeight: '600', color: 'var(--warn)' } }, `${okCount} 件成功、${failCount} 件失敗`),
-              el('p', null, '物理的にデバイスを抜き取ってください。'),
-              el('ul', { style: { fontSize: '12px', paddingLeft: '20px' } },
-                ...results.map(x => el('li', { style: { fontFamily: 'SF Mono, Monaco, monospace' } },
-                  (x.ok || x.alreadyEjected ? '✓ ' : '✗ ') + x.vol + (x.error ? ' — ' + x.error : '')))),
-            );
-            U.modal({
-              title: failCount === 0 ? '取り外せます' : '取り外し結果',
-              body: resultBody,
-              okText: 'OK',
-              cancelText: '',
-            });
-          },
+          onOk: ejectAllWithResult,
         });
       }, 400);
     }

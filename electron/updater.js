@@ -48,18 +48,32 @@ function setupAutoUpdater() {
 
   autoUpdater.on('update-downloaded', (info) => {
     updateDownloaded = true;
-    const choice = dialog.showMessageBoxSync(mainWin(), {
-      type: 'info',
-      buttons: ['今すぐ再起動して適用', '次回起動時に適用'],
-      defaultId: 0,
-      cancelId: 1,
-      title: 'アップデート',
-      message: `新しいバージョン v${info?.version} をダウンロードしました`,
-      detail: '今すぐ再起動して新バージョンを適用しますか？\n（「次回起動時に適用」を選ぶと、アプリを次に終了したとき自動的に適用されます）',
-    });
-    if (choice === 0) {
-      setImmediate(() => autoUpdater.quitAndInstall());
-    }
+    // showMessageBoxSync はメインプロセスの JS を止める（進行中のコピーも停止する）ため、
+    // また「今すぐ再起動」がコピー中断＝書きかけファイル残留を招くため、
+    // 取り込み実行中はダイアログを出さず、取り込みが終わるまで待ってから表示する。
+    const showDialog = () => {
+      const choice = dialog.showMessageBoxSync(mainWin(), {
+        type: 'info',
+        buttons: ['今すぐ再起動して適用', '次回起動時に適用'],
+        defaultId: 0,
+        cancelId: 1,
+        title: 'アップデート',
+        message: `新しいバージョン v${info?.version} をダウンロードしました`,
+        detail: '今すぐ再起動して新バージョンを適用しますか？\n（「次回起動時に適用」を選ぶと、アプリを次に終了したとき自動的に適用されます）',
+      });
+      if (choice === 0) {
+        setImmediate(() => autoUpdater.quitAndInstall());
+      }
+    };
+    const waitForIdle = () => {
+      const ingest = require('./ingest-handler');
+      if (ingest.isIngestBusy()) {
+        setTimeout(waitForIdle, 15000);
+        return;
+      }
+      showDialog();
+    };
+    waitForIdle();
   });
 
   autoUpdater.on('error', (err) => {
@@ -105,6 +119,17 @@ async function manualCheckWithDialog() {
     return;
   }
   if (updateDownloaded) {
+    // 取り込み中の再起動はコピー中断＝書きかけファイル残留を招くため受け付けない
+    const ingest = require('./ingest-handler');
+    if (ingest.isIngestBusy()) {
+      dialog.showMessageBox(win, {
+        type: 'info',
+        title: 'アップデート',
+        message: `v${latestKnownVersion} はダウンロード済みです`,
+        detail: 'データ取り込みが実行中のため、今は適用できません。取り込み完了後にもう一度お試しください。',
+      });
+      return;
+    }
     const choice = dialog.showMessageBoxSync(win, {
       type: 'info',
       buttons: ['今すぐ再起動して適用', '後で'],

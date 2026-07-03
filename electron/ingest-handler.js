@@ -92,11 +92,15 @@ async function removeDirIfEmptyMeta(dir, boundary) {
 let cancelRequested = false;
 const activeStreams = new Set();
 
-ipcMain.handle('ingest:cancel', async () => {
+function requestCancel() {
   cancelRequested = true;
   for (const s of activeStreams) {
     try { s.destroy(); } catch (_) {}
   }
+}
+
+ipcMain.handle('ingest:cancel', async () => {
+  requestCancel();
   return { ok: true };
 });
 
@@ -269,22 +273,27 @@ ipcMain.handle('ingest:prepareTarget', async (_e, args = {}) => {
   };
 });
 
-// track=true のとき activeStreams に登録し、ingest:cancel で destroy できるようにする
-// （checkDuplicates は取り込み外のため track しない）
-function hashFile(filePath, track = false) {
+// track=true のとき activeStreams に登録し、ingest:cancel で destroy できるようにする。
+// extra.streams で別のストリームセットを指定可（checkDuplicates は専用セットで中断管理する）。
+// extra.onBytes(チャンク長) で読み取り進捗を通知できる。
+function hashFile(filePath, track = false, extra = {}) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
     const stream = fs.createReadStream(filePath, { highWaterMark: STREAM_HWM });
-    if (track) activeStreams.add(stream);
+    const streamSet = extra.streams || (track ? activeStreams : null);
+    if (streamSet) streamSet.add(stream);
     let settled = false;
     const done = (err, val) => {
       if (settled) return;
       settled = true;
-      if (track) activeStreams.delete(stream);
+      if (streamSet) streamSet.delete(stream);
       if (err) reject(err); else resolve(val);
     };
     stream.on('error', (e) => done(e));
-    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('data', (chunk) => {
+      hash.update(chunk);
+      if (extra.onBytes) extra.onBytes(chunk.length);
+    });
     stream.on('end', () => done(null, hash.digest('hex')));
     // destroy() では 'end' も 'error' も来ないため、'close' で未完なら中断として reject
     stream.on('close', () => done(new Error('ハッシュ計算が中断されました')));
@@ -295,7 +304,7 @@ function hashFile(filePath, track = false) {
 // 従来は「①事前ハッシュで src 読み → ②コピーで src 読み → ③削除前リチェックで src 読み」と
 // 同じファイルを最大3回読んでいたが、コピー中のインラインハッシュで src 読みを1回にできる。
 // resolve 値 = 転送バイト列の SHA-256（＝コピー時点の src の内容のハッシュ）
-function copyStreamHashed(src, dst) {
+function copyStreamHashed(src, dst, onBytes = null) {
   return new Promise((resolve, reject) => {
     const rs = fs.createReadStream(src, { highWaterMark: STREAM_HWM });
     const ws = fs.createWriteStream(dst, { highWaterMark: STREAM_HWM });
@@ -311,7 +320,10 @@ function copyStreamHashed(src, dst) {
       activeStreams.delete(ws);
       if (err) reject(err); else resolve(sha);
     };
-    rs.on('data', (chunk) => hash.update(chunk));
+    rs.on('data', (chunk) => {
+      hash.update(chunk);
+      if (onBytes) onBytes(chunk.length);
+    });
     // 片側エラー時はもう片側も閉じる（fd リーク防止）
     rs.on('error', (e) => { try { ws.destroy(); } catch (_) {} done(e); });
     ws.on('error', (e) => { try { rs.destroy(); } catch (_) {} done(e); });
@@ -360,6 +372,21 @@ async function runIngest(args) {
     return true;
   });
   const totalBytes = planned.reduce((s, f) => s + (f.size || 0), 0);
+
+  // サイズ事前フィルタ（checkDuplicates と同じ理屈のコピー前プレハッシュ版）:
+  // 「DB に同サイズの記録なし」かつ「同一バッチ内にも同サイズのファイルなし」なら
+  // そのファイルは重複になり得ず、バッチ内調停(inFlightBySha)も不要
+  // → コピー前の事前ハッシュ（src 全読み1回分）を丸ごと省略できる。
+  // バッチ内に同サイズがある場合は従来どおり事前ハッシュ＋調停に回す（同一内容の
+  // ファイルを同時に2つコピーしてしまう事故を防ぐ。同一内容なら必ず同サイズ）。
+  const knownSizes = db.getKnownSizes();
+  const batchSizeCount = new Map();
+  for (const f of planned) {
+    if (typeof f.size === 'number') {
+      batchSizeCount.set(f.size, (batchSizeCount.get(f.size) || 0) + 1);
+    }
+  }
+
   let doneBytes = 0;
   let copied = 0;
   let skippedDup = 0;
@@ -375,6 +402,10 @@ async function runIngest(args) {
   // 削除設定を取得（種別ごと）
   const cfg = settings.getAll();
   const deleteAfterCopy = cfg.deleteAfterCopy || {};
+  // コピー後の読み戻し照合を行うか（既定 true）。
+  // OFF 設定でも「コピー後に元ファイルを削除する種別」では必ず照合する
+  // （src が残らないため、読み戻し照合が破損検出の最終防衛線になる）。
+  const verifySetting = cfg.verifyAfterCopy !== false;
 
   // コピー先の実パス一覧（削除ガードと空フォルダ後片付けの両方で使う）:
   // 今回の targets / outputRoot / 全種別の保存先ルート（絶対パス設定を含む）
@@ -403,6 +434,29 @@ async function runIngest(args) {
   const inFlightBySha = new Map(); // sha -> Promise<{ok:boolean}>
   const isSha256 = (s) => typeof s === 'string' && /^[0-9a-f]{64}$/i.test(s);
 
+  // ファイル内バイト進捗: 大容量動画1本のコピー/照合に数分かかっても進捗バーが
+  // 止まって見えないよう、250ms スロットルで file-progress を通知する。
+  // inFlightBytes は「まだ doneBytes に繰り入れていない、進行中コピーの転送済みバイト」。
+  const inFlightBytes = new Map(); // index -> bytes
+  let lastByteEmit = 0;
+  function emitByteProgress(i, f, phase, phaseBytes) {
+    const now = Date.now();
+    if (now - lastByteEmit < 250) return;
+    lastByteEmit = now;
+    let inFlight = 0;
+    for (const v of inFlightBytes.values()) inFlight += v;
+    emitProgress({
+      type: 'file-progress',
+      index: i,
+      name: path.basename(f.path),
+      phase,                       // 'copy' | 'verify'
+      phaseBytes,                  // その処理フェーズで読み/書きしたバイト数
+      fileSize: f.size || 0,
+      bytes: Math.min(doneBytes + inFlight, totalBytes),
+      totalBytes,
+    });
+  }
+
   // 削除を見送るときの警告（コピー/スキップ自体は成功しているので「失敗」にはしない）
   function warnSkipDelete(f, i, msg) {
     warnings.push({ file: f.path, error: msg });
@@ -417,6 +471,7 @@ async function runIngest(args) {
   //   5. src が事前チェック以降変更されていない（stat 照合）
   async function handleDupSkip(f, i, sha) {
     skippedDup++;
+    inFlightBytes.delete(i); // 進行中バイトを doneBytes へ繰り入れ（二重計上防止）
     doneBytes += f.size || 0;
     emitProgress({ type: 'file-skip', index: i, reason: 'duplicate', name: path.basename(f.path), bytes: doneBytes, totalBytes });
 
@@ -528,6 +583,7 @@ async function runIngest(args) {
       let knownSha = null;
       if (diffEnabled) {
         let preSha = null;
+        let sizeRuledOut = false; // サイズ事前フィルタで「重複になり得ない」と確定したか
         if (isSha256(f.sha256)) {
           try {
             const st = fs.statSync(f.path);
@@ -535,9 +591,21 @@ async function runIngest(args) {
               && (f.mtime === undefined || Math.abs(st.mtimeMs - f.mtime) < 1);
             if (statOk) preSha = f.sha256.toLowerCase();
           } catch (_) { /* stat 不能 → 再ハッシュへ */ }
+        } else if (knownSizes) {
+          try {
+            const st = fs.statSync(f.path);
+            // 実サイズ＝スキャン時サイズ（変更の形跡なし）で、DB にもバッチ内にも
+            // 同サイズが存在しない場合のみ事前ハッシュを省略（バッチ内カウントは自分を含むため <=1）
+            sizeRuledOut = st.size === f.size
+              && !knownSizes.has(st.size)
+              && (batchSizeCount.get(f.size) || 0) <= 1;
+          } catch (_) { /* stat 不能 → 従来どおり事前ハッシュへ */ }
         }
-        knownSha = preSha || await hashFile(f.path, true);
-
+        if (!sizeRuledOut) {
+          knownSha = preSha || await hashFile(f.path, true);
+        }
+      }
+      if (knownSha) {
         // --- 2) 重複判定 + 同一バッチ内の調停（担当が決まるまでループ） ---
         // 先行ファイル（同一 sha）の完了を待ったあとは、claim の結果値を信用せず
         // 必ず db.hasHash で再判定する。担当が実際に記録できたときだけ重複扱いになるので、
@@ -582,7 +650,10 @@ async function runIngest(args) {
         // --- 3) コピー＋インラインハッシュ（src の読み取りはこの1回だけ） ---
         let srcSha;
         try {
-          srcSha = await copyStreamHashed(f.path, dst);
+          srcSha = await copyStreamHashed(f.path, dst, (n) => {
+            inFlightBytes.set(i, (inFlightBytes.get(i) || 0) + n);
+            emitByteProgress(i, f, 'copy', inFlightBytes.get(i));
+          });
         } catch (copyErr) {
           // コピー途中の中断/失敗: 書きかけの dst をこの場で削除してから上位 catch へ。
           // （dst はここで確実に特定できる。e.path からの推測は読み込み側エラー時に
@@ -590,6 +661,14 @@ async function runIngest(args) {
           try { if (fs.existsSync(dst)) fs.unlinkSync(dst); } catch (_) {}
           throw copyErr;
         }
+
+        // 書き込みを物理ストレージへ確定（fsync）。これが無いと直後の読み戻しが
+        // OS のローカルキャッシュから返ってしまい、照合の実効性が下がる
+        // （SMB では fsync がサーバ側へのフラッシュを強制する）。
+        try {
+          const fh = await fsp.open(dst, 'r+');
+          try { await fh.sync(); } finally { await fh.close(); }
+        } catch (_) { /* fsync 非対応の FS では何もしない（従来と同等の保証水準） */ }
 
         // 事前チェック時のハッシュと不一致 → 事前 stat 検証をすり抜けた変更（極めて稀）。
         // コピーで実際に読んだ内容(srcSha)を真として重複判定をやり直す。
@@ -604,25 +683,53 @@ async function runIngest(args) {
           }
         }
 
-        // --- 4) 書き込み後リチェック（dst を読み戻して照合。常に実施） ---
-        // 例外（中断・I/Oエラー）時も未検証の dst を残さない（DB 未記録の孤児ファイル防止）
-        let dstSha;
-        try {
-          dstSha = await hashFile(dst, true);
-        } catch (e) {
-          try { if (fs.existsSync(dst)) fs.unlinkSync(dst); } catch (_) {}
-          throw e;
-        }
-        if (dstSha !== srcSha) {
+        // サイズ事前フィルタでプレハッシュを省略したファイルの保険:
+        // コピーで得た srcSha で重複を最終判定する（フィルタ条件が正しければ到達しないが、
+        // チェックと取り込みの間にファイル内容が変わった等の万一でも二重登録を防ぐ）
+        if (diffEnabled && !knownSha && db.hasHash(srcSha)) {
           try { fs.unlinkSync(dst); } catch (_) {}
-          failed++;
-          doneBytes += f.size || 0;
-          failures.push({ file: f.path, error: 'コピー後リチェック失敗（ハッシュ不一致）' });
-          emitProgress({ type: 'file-fail', index: i, name: path.basename(f.path), error: 'コピー後リチェック失敗', bytes: doneBytes, totalBytes });
+          await handleDupSkip(f, i, srcSha);
           return;
         }
 
+        // --- 4) 書き込み後リチェック（dst を読み戻して照合） ---
+        // 設定 verifyAfterCopy=false でも、元ファイルを削除する種別では必ず実施する。
+        // 例外（中断・I/Oエラー）時も未検証の dst を残さない（DB 未記録の孤児ファイル防止）
+        const mustVerify = verifySetting || (f.type && deleteAfterCopy[f.type] === true);
+        if (mustVerify) {
+          let verifiedBytes = 0;
+          let dstSha;
+          try {
+            dstSha = await hashFile(dst, true, {
+              onBytes: (n) => {
+                verifiedBytes += n;
+                emitByteProgress(i, f, 'verify', verifiedBytes);
+              },
+            });
+          } catch (e) {
+            try { if (fs.existsSync(dst)) fs.unlinkSync(dst); } catch (_) {}
+            throw e;
+          }
+          if (dstSha !== srcSha) {
+            try { fs.unlinkSync(dst); } catch (_) {}
+            failed++;
+            inFlightBytes.delete(i);
+            doneBytes += f.size || 0;
+            failures.push({ file: f.path, error: 'コピー後リチェック失敗（ハッシュ不一致）' });
+            emitProgress({ type: 'file-fail', index: i, name: path.basename(f.path), error: 'コピー後リチェック失敗', bytes: doneBytes, totalBytes });
+            return;
+          }
+        }
+
         if (diffEnabled) {
+          // 記録直前の最終重複ガード（この判定と recordFile の間に await を挟まないこと）。
+          // 自分がコピー・検証している間に、サイズ事前フィルタで調停(inFlightBySha)を
+          // 通らなかった別ファイルが同一内容を先に記録した場合ここで検出し、二重登録を防ぐ。
+          if (db.hasHash(srcSha)) {
+            try { fs.unlinkSync(dst); } catch (_) {}
+            await handleDupSkip(f, i, srcSha);
+            return;
+          }
           db.recordFile({
             sha256: srcSha,
             srcPath: f.path,
@@ -635,6 +742,7 @@ async function runIngest(args) {
         }
 
         copied++;
+        inFlightBytes.delete(i); // 進行中バイトを doneBytes へ繰り入れ
         doneBytes += f.size || 0;
 
         // DICOM 送信対象: 種別が surgicalPhoto なら自動的に候補入り
@@ -702,10 +810,13 @@ async function runIngest(args) {
       // （この catch に来るのは copied++ より前のエラーのみなので bytes 加算は二重にならない）
       if (!cancelRequested) {
         failed++;
+        inFlightBytes.delete(i);
         doneBytes += f.size || 0;
         failures.push({ file: f.path, error: String(e?.message || e) });
         emitProgress({ type: 'file-fail', index: i, name: path.basename(f.path), error: String(e?.message || e), bytes: doneBytes, totalBytes });
       }
+    } finally {
+      inFlightBytes.delete(i); // 全経路の取りこぼし防止（中断時など）
     }
   }
 
@@ -800,15 +911,46 @@ async function runIngest(args) {
 // プレビュー前の重複チェック: 全ファイルを並行ハッシュ計算し、履歴DBと照合
 // 結果: [{ path, sha256, alreadyImported }] を返す
 // 進捗は ingest:checkProgress イベントで通知
+// 再入ガード: レンダラのリロード・画面往復で二重起動すると進捗イベントが混線し
+// SD への読み込みも倍になるため、常に単一実行にする
+let checkBusy = false;
+let checkCancelRequested = false;
+const checkStreams = new Set();
+
+// 重複チェックの中断（UI のキャンセルボタンから）。進行中のハッシュ計算を止める
+ipcMain.handle('ingest:cancelCheck', async () => {
+  checkCancelRequested = true;
+  for (const s of checkStreams) {
+    try { s.destroy(); } catch (_) {}
+  }
+  return { ok: true };
+});
+
 ipcMain.handle('ingest:checkDuplicates', async (_e, args = {}) => {
   const files = Array.isArray(args.files) ? args.files : [];
   if (files.length === 0) return { ok: true, results: [] };
+  if (checkBusy) return { ok: false, busy: true, error: '重複チェックが既に実行中です' };
+  checkBusy = true;
+  checkCancelRequested = false;
+  try {
+    return await runCheckDuplicates(files);
+  } finally {
+    checkBusy = false;
+  }
+});
 
+async function runCheckDuplicates(files) {
   const total = files.length;
   let done = 0;
   const results = new Array(total);
   const CONCURRENCY = 4; // I/Oバウンドなので4並列くらいが妥当
   let nextIdx = 0;
+
+  // サイズ事前フィルタ: DB に同じサイズの記録が1件も無いファイルは重複になり得ないため、
+  // ハッシュ計算（ファイル全読み）を省略する。大容量動画が大半のこのアプリでは、
+  // 新規データの取り込み時にチェックが stat のみ（ほぼ一瞬）で済む。
+  // getKnownSizes() が null（サイズ不明の記録あり）ならフィルタ無効＝従来どおり全ハッシュ。
+  const knownSizes = db.getKnownSizes();
 
   const emit = (payload) => {
     for (const win of BrowserWindow.getAllWindows()) {
@@ -820,14 +962,28 @@ ipcMain.handle('ingest:checkDuplicates', async (_e, args = {}) => {
 
   async function worker() {
     while (true) {
+      if (checkCancelRequested) return;
       const i = nextIdx++;
       if (i >= total) return;
       const f = files[i];
       try {
-        const sha = await hashFile(f.path);
-        const dup = db.hasHash(sha);
-        results[i] = { path: f.path, sha256: sha, alreadyImported: dup };
+        let skipHash = false;
+        if (knownSizes) {
+          try {
+            skipHash = !knownSizes.has(fs.statSync(f.path).size);
+          } catch (_) { /* stat 不能 → 従来どおりハッシュ側でエラー判定 */ }
+        }
+        if (skipHash) {
+          // 同サイズの取り込み記録なし＝重複ではない。sha256 は未計算のまま返す
+          // （取り込み本体はコピー中のインラインハッシュで sha を得るため問題ない）
+          results[i] = { path: f.path, sha256: null, alreadyImported: false };
+        } else {
+          const sha = await hashFile(f.path, false, { streams: checkStreams });
+          const dup = db.hasHash(sha);
+          results[i] = { path: f.path, sha256: sha, alreadyImported: dup };
+        }
       } catch (e) {
+        if (checkCancelRequested) return; // 中断由来のエラーは結果に残さない
         results[i] = { path: f.path, sha256: null, alreadyImported: false, error: String(e?.message || e) };
       }
       done++;
@@ -843,9 +999,12 @@ ipcMain.handle('ingest:checkDuplicates', async (_e, args = {}) => {
 
   emit({ type: 'done', total });
 
+  if (checkCancelRequested) {
+    return { ok: false, cancelled: true, results: [] };
+  }
   const dupCount = results.filter(r => r && r.alreadyImported).length;
   return { ok: true, results, duplicateCount: dupCount };
-});
+}
 
 // /Volumes/ 配下のボリュームを eject する（macOS: diskutil eject）
 ipcMain.handle('ingest:ejectVolume', async (_e, args = {}) => {
@@ -868,4 +1027,21 @@ ipcMain.handle('ingest:ejectVolume', async (_e, args = {}) => {
   });
 });
 
-module.exports = {};
+// 取り込み実行中かどうか（main.js の終了ガード / updater.js のダイアログ遅延から参照）
+function isIngestBusy() {
+  return ingestBusy;
+}
+
+// 取り込みを中断し、完了処理（書きかけ dst の削除・DB flush）が終わるまで待つ。
+// アプリ終了時に呼ばれる。タイムアウトしたら false を返す（呼び出し側は終了を続行する）。
+async function cancelAndWaitIdle(timeoutMs = 30000) {
+  if (!ingestBusy) return true;
+  requestCancel();
+  const deadline = Date.now() + timeoutMs;
+  while (ingestBusy && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return !ingestBusy;
+}
+
+module.exports = { isIngestBusy, cancelAndWaitIdle };

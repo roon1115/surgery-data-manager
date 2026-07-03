@@ -103,11 +103,29 @@ window.Views.preview = (function() {
         }
         const destPath = targetPathFor(src.type);
         const dupCount = src.files.filter(f => f.alreadyImported).length;
-        // 「除外済み」表示は実際の選択状態ベース（既取込でも再選択されていれば除外扱いしない）
-        const dupExcludedCount = src.files.filter(f => f.alreadyImported && !f.selected).length;
-        const selectedCount = src.files.filter(f => f.selected).length;
         const totalCount = src.files.length;
-        const selectedBytes = src.files.filter(f => f.selected).reduce((a, b) => a + (b.size || 0), 0);
+
+        // 選択状況の行はチェックボックス操作のたびに更新されるため、
+        // リスト全体を作り直さず（＝スクロール位置を失わず）この行だけ書き換える
+        const statsLine = el('div', { style: { flex: '1', fontSize: '12px' } });
+        const updateStatsLine = () => {
+          // 「除外済み」表示は実際の選択状態ベース（既取込でも再選択されていれば除外扱いしない）
+          const dupExcludedCount = src.files.filter(f => f.alreadyImported && !f.selected).length;
+          const selectedCount = src.files.filter(f => f.selected).length;
+          const selectedBytes = src.files.filter(f => f.selected).reduce((a, b) => a + (b.size || 0), 0);
+          statsLine.replaceChildren(
+            document.createTextNode(`選択: ${selectedCount} / ${totalCount} ファイル（${formatBytes(selectedBytes)}）`),
+            dupExcludedCount > 0
+              ? el('span', { style: { marginLeft: '8px', color: 'var(--fg-mute)' } },
+                  `／ うち既取込 ${dupExcludedCount} 件は除外済み`)
+              : document.createTextNode(''),
+            (dupCount - dupExcludedCount) > 0
+              ? el('span', { style: { marginLeft: '8px', color: 'var(--warn, #f59e0b)' } },
+                  `／ ⚠ 既取込 ${dupCount - dupExcludedCount} 件が選択中`)
+              : document.createTextNode(''),
+          );
+        };
+        updateStatsLine();
 
         // ソース内の一括選択/解除
         // 全選択は「画面に表示されているファイル」のみを対象にする。
@@ -148,8 +166,10 @@ window.Views.preview = (function() {
             cb.checked = !!f.selected;
             cb.addEventListener('change', () => {
               f.selected = cb.checked;
+              // 全再描画するとリストのスクロール位置が先頭に戻り、下の方のファイルを
+              // 連続でチェック操作できなくなるため、サマリと選択状況の行だけ更新する
               renderSummary();
-              renderSources();
+              updateStatsLine();
             });
 
             ul.appendChild(el('li', {
@@ -197,17 +217,7 @@ window.Views.preview = (function() {
               `${destPath}/`),
           ),
           el('div', { class: 'row', style: { alignItems: 'center', marginBottom: '8px' } },
-            el('div', { style: { flex: '1', fontSize: '12px' } },
-              `選択: ${selectedCount} / ${totalCount} ファイル（${formatBytes(selectedBytes)}）`,
-              dupExcludedCount > 0
-                ? el('span', { style: { marginLeft: '8px', color: 'var(--fg-mute)' } },
-                    `／ うち既取込 ${dupExcludedCount} 件は除外済み`)
-                : null,
-              (dupCount - dupExcludedCount) > 0
-                ? el('span', { style: { marginLeft: '8px', color: 'var(--warn, #f59e0b)' } },
-                    `／ ⚠ 既取込 ${dupCount - dupExcludedCount} 件が選択中`)
-                : null,
-            ),
+            statsLine,
             allOnBtn, allOffBtn, toggleBtn,
           ),
           fileListEl,
@@ -223,6 +233,10 @@ window.Views.preview = (function() {
         U.modal({ title: 'コピー対象なし', body: 'チェックされているファイルがありません。' });
         return;
       }
+      // 新しい取り込みの開始を宣言（ingest ビューは ingestResult が残っていると
+      // 「実行済みの結果表示」モードになり再実行しないため、ここでクリアする）
+      state.ingestResult = null;
+      state.dicomResult = null;
       state.goto('ingest');
     }}, 'コピー開始 →');
 

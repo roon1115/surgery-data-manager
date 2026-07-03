@@ -140,14 +140,18 @@ window.Views.patient = (function() {
         U.modal({ title: '入力エラー', body: '処置名を入力してください。' });
         return;
       }
-      if (!elNameRomaji.value.trim()) {
-        U.modal({ title: '入力エラー', body: 'DICOM送信用の患者名（英数）を入力してください。' });
+      // 非ASCII除去（strip）後の値で検証する。strip 前の値で検証すると、
+      // ローマ字欄にカタカナ等を手入力した場合にチェックを通過して
+      // PatientName が空のまま DICOM 送信されてしまう。
+      const nameRomajiStripped = elNameRomaji.value.trim().replace(/[^\x20-\x7E]/g, '').trim();
+      if (!nameRomajiStripped) {
+        U.modal({ title: '入力エラー', body: 'DICOM送信用の患者名は半角英数で入力してください（日本語文字は送信時に除去されるため、英数以外のみの入力は無効です）。' });
         return;
       }
       state.patient = {
         id: elId.value.trim(),
         name: elName.value.trim(),
-        nameRomaji: elNameRomaji.value.trim().replace(/[^\x20-\x7E]/g, ''),
+        nameRomaji: nameRomajiStripped,
         procedure: elProcedure.value.trim(),
         date: elDate.value || todayIso(),
       };

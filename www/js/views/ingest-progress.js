@@ -4,8 +4,10 @@ window.Views.ingest = (function() {
 
   async function prepareTarget(state) {
     const usedTypes = [...new Set(state.sources.filter(s => s.type).map(s => s.type))];
-    // 履歴から呼び出した患者なら衝突確認なしで追記モード ('keep')
-    const onCollision = state.isExistingPatient ? 'keep' : (state.onCollision || 'keep');
+    // 履歴から呼び出した患者は衝突確認なしで追記モード ('keep')。
+    // 新規入力の患者は 'abort' で衝突を検出し、下のモーダルで「追記/別名/中止」を確認する
+    // （同名フォルダへの無確認追記＝別患者データ混入を防ぐ）。
+    const onCollision = state.isExistingPatient ? 'keep' : (state.onCollision || 'abort');
     const r = await window.App.ingest.prepareTarget({
       patient: state.patient,
       date: state.patient.date,
@@ -78,21 +80,45 @@ window.Views.ingest = (function() {
     return 'other';
   }
 
+  const MAX_LOG_LINES = 1000; // 数千ファイルの取り込みで DOM が肥大しないよう上限を設ける
+
   async function render(state, mount) {
+    // ==== 再実行防止 ====
+    // このビューは「表示＝コピー実行」なので、DICOM 画面の「← 戻る」等で再表示されたときに
+    // 取り込みが再走しないよう、実行済みなら結果の再表示だけを行う。
+    // （新しい取り込みを始めるときは preview 側で state.ingestResult を null にしてから遷移する）
+    if (state.ingestResult) {
+      renderResultOnly(state, mount, state.ingestResult);
+      return;
+    }
+
     const elProgress = el('div', { class: 'progress-bar' }, el('div', { class: 'fill', style: { width: '0%' } }));
     const elStatus = el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)' } }, '準備中...');
     const elLog = el('div', { class: 'log' });
+    const stCopied = el('div', { class: 'num' }, '0');
+    const stSkip = el('div', { class: 'num' }, '0');
+    const stFail = el('div', { class: 'num' }, '0');
+    const stBytes = el('div', { class: 'num' }, '0 B');
     const elStats = el('div', { class: 'summary' },
-      el('div', { class: 'stat' }, el('div', { class: 'num', id: 'st-copied' }, '0'), el('div', { class: 'label' }, 'コピー済')),
-      el('div', { class: 'stat' }, el('div', { class: 'num', id: 'st-skip' }, '0'), el('div', { class: 'label' }, 'スキップ')),
-      el('div', { class: 'stat' }, el('div', { class: 'num', id: 'st-fail' }, '0'), el('div', { class: 'label' }, '失敗')),
-      el('div', { class: 'stat' }, el('div', { class: 'num', id: 'st-bytes' }, '0 B'), el('div', { class: 'label' }, '処理済')),
+      el('div', { class: 'stat' }, stCopied, el('div', { class: 'label' }, 'コピー済')),
+      el('div', { class: 'stat' }, stSkip, el('div', { class: 'label' }, 'スキップ')),
+      el('div', { class: 'stat' }, stFail, el('div', { class: 'label' }, '失敗')),
+      el('div', { class: 'stat' }, stBytes, el('div', { class: 'label' }, '処理済')),
     );
 
+    // ログ: 行数上限 + スクロールは rAF でまとめる（イベント毎の同期リフロー防止）
+    let scrollQueued = false;
     function logLine(text, cls) {
       const line = el('div', { class: cls || '' }, text);
       elLog.appendChild(line);
-      elLog.scrollTop = elLog.scrollHeight;
+      while (elLog.childElementCount > MAX_LOG_LINES) elLog.removeChild(elLog.firstElementChild);
+      if (!scrollQueued) {
+        scrollQueued = true;
+        requestAnimationFrame(() => {
+          scrollQueued = false;
+          elLog.scrollTop = elLog.scrollHeight;
+        });
+      }
     }
 
     const cancelBtn = el('button', { class: 'danger' }, '中断');
@@ -170,14 +196,21 @@ window.Views.ingest = (function() {
       if (idx != null) countedIdx.add(idx);
       processedCount++;
     };
-    const updateStatus = () => {
-      const names = [...inFlightNames.values()];
-      let suffix = '';
-      if (names.length > 0) {
-        const shown = names.slice(0, 2).join(', ');
-        suffix = ` — コピー中: ${shown}` + (names.length > 2 ? ` ほか${names.length - 2}件` : '');
+    const updateStatus = (progressSuffix) => {
+      let suffix = progressSuffix || '';
+      if (!suffix) {
+        const names = [...inFlightNames.values()];
+        if (names.length > 0) {
+          const shown = names.slice(0, 2).join(', ');
+          suffix = ` — コピー中: ${shown}` + (names.length > 2 ? ` ほか${names.length - 2}件` : '');
+        }
       }
       elStatus.textContent = `${processedCount} / ${totalFiles} ファイル完了${suffix}`;
+    };
+    const setBar = (bytes, totalBytes) => {
+      if (totalBytes > 0 && bytes != null) {
+        elProgress.firstElementChild.style.width = ((bytes / totalBytes) * 100).toFixed(1) + '%';
+      }
     };
     const off = window.App.ingest.onProgress((data) => {
       if (data.type === 'start') {
@@ -186,34 +219,35 @@ window.Views.ingest = (function() {
       } else if (data.type === 'file-start') {
         inFlightNames.set(data.index, data.name);
         updateStatus();
+      } else if (data.type === 'file-progress') {
+        // 大容量ファイルのコピー/照合中のバイト単位進捗（main 側で 250ms スロットル済み）
+        setBar(data.bytes, data.totalBytes);
+        stBytes.textContent = U.formatBytes(data.bytes);
+        const phaseLabel = data.phase === 'verify' ? '照合中' : 'コピー中';
+        const pct = data.fileSize > 0 ? Math.min(100, (data.phaseBytes / data.fileSize) * 100).toFixed(0) + '%' : '';
+        updateStatus(` — ${phaseLabel}: ${data.name} ${pct}`);
       } else if (data.type === 'file-done') {
         countOnce(data.index);
         inFlightNames.delete(data.index);
         updateStatus();
         logLine('✓ ' + data.name, 'ok');
-        document.getElementById('st-copied').textContent = String((parseInt(document.getElementById('st-copied').textContent, 10) || 0) + 1);
-        document.getElementById('st-bytes').textContent = U.formatBytes(data.bytes);
-        if (data.totalBytes > 0) {
-          elProgress.firstElementChild.style.width = ((data.bytes / data.totalBytes) * 100).toFixed(1) + '%';
-        }
+        stCopied.textContent = String((parseInt(stCopied.textContent, 10) || 0) + 1);
+        stBytes.textContent = U.formatBytes(data.bytes);
+        setBar(data.bytes, data.totalBytes);
       } else if (data.type === 'file-skip') {
         countOnce(data.index);
         inFlightNames.delete(data.index);
         updateStatus();
         logLine('⊘ ' + data.name + '（' + (data.reason === 'duplicate' ? '重複' : data.reason) + '）', 'skip');
-        document.getElementById('st-skip').textContent = String((parseInt(document.getElementById('st-skip').textContent, 10) || 0) + 1);
-        if (data.totalBytes > 0 && data.bytes != null) {
-          elProgress.firstElementChild.style.width = ((data.bytes / data.totalBytes) * 100).toFixed(1) + '%';
-        }
+        stSkip.textContent = String((parseInt(stSkip.textContent, 10) || 0) + 1);
+        setBar(data.bytes, data.totalBytes);
       } else if (data.type === 'file-fail') {
         countOnce(data.index);
         inFlightNames.delete(data.index);
         updateStatus();
         logLine('✗ ' + data.name + ' — ' + data.error, 'err');
-        document.getElementById('st-fail').textContent = String((parseInt(document.getElementById('st-fail').textContent, 10) || 0) + 1);
-        if (data.totalBytes > 0 && data.bytes != null) {
-          elProgress.firstElementChild.style.width = ((data.bytes / data.totalBytes) * 100).toFixed(1) + '%';
-        }
+        stFail.textContent = String((parseInt(stFail.textContent, 10) || 0) + 1);
+        setBar(data.bytes, data.totalBytes);
       } else if (data.type === 'file-warn') {
         // 警告（削除見送り等）: コピー/スキップ自体は成功しているので失敗カウンタは増やさない
         logLine('⚠ ' + data.name + ' — ' + data.error, 'warn');
@@ -235,15 +269,34 @@ window.Views.ingest = (function() {
     });
 
     // 4. 単一プロセスで全ソースをまとめて取り込む（差分判定は各ファイルの useHashDiff を尊重）
+    state.ingestRunning = true; // コピー中はヘッダーからの画面離脱を app.js 側でガード
     const useHashDiff = state.sources.some(s => s.useHashDiff);
-    const result = await window.App.ingest.start({
-      targets: state.targets,
-      files: allFiles,
-      patient: state.patient,
-      folderName: state.folderName,
-      useHashDiff,
-    });
-    off();
+    let result;
+    try {
+      result = await window.App.ingest.start({
+        targets: state.targets,
+        files: allFiles,
+        patient: state.patient,
+        folderName: state.folderName,
+        useHashDiff,
+      });
+    } finally {
+      state.ingestRunning = false;
+      off();
+    }
+
+    // main 側で開始できなかった場合（二重起動・引数不正など）はエラーを明示する
+    if (!result || (result.ok === false && !result.cancelled && result.error)) {
+      const msg = result?.error || '取り込みを開始できませんでした';
+      logLine('✗ ' + msg, 'err');
+      elStatus.textContent = 'エラー: ' + msg;
+      cancelBtn.classList.remove('danger');
+      cancelBtn.classList.add('ghost');
+      cancelBtn.textContent = '← プレビューへ戻る';
+      cancelBtn.disabled = false;
+      cancelBtn.onclick = () => state.goto('preview');
+      return;
+    }
 
     state.ingestResult = result;
 
@@ -269,7 +322,10 @@ window.Views.ingest = (function() {
     cancelBtn.classList.add('ghost');
     cancelBtn.textContent = result.cancelled ? '← プレビューへ戻る' : '中断';
     cancelBtn.disabled = !result.cancelled;
-    cancelBtn.onclick = () => state.goto('preview');
+    cancelBtn.onclick = () => {
+      state.ingestResult = null; // プレビューからやり直す＝次の ingest 表示で再実行できるように
+      state.goto('preview');
+    };
 
     const hasDicom = (result.dicomCandidates || []).length > 0;
     nextBtn.disabled = !hasDicom;
@@ -281,6 +337,45 @@ window.Views.ingest = (function() {
     } else {
       logLine(`DICOM送信対象: ${result.dicomCandidates.length} 枚`, 'ok');
     }
+  }
+
+  // 実行済み取り込みの結果だけを再表示する（DICOM 画面から戻ってきたとき等）。
+  // ここではコピーを一切実行しない。
+  function renderResultOnly(state, mount, result) {
+    const delPart = result.deleted ? ` / 削除 ${result.deleted}` : '';
+    const statusText = result.cancelled
+      ? `中断しました: コピー済 ${result.copied || 0} / スキップ ${result.skippedDup || 0} / 失敗 ${result.failed || 0}${delPart}`
+      : `完了: コピー ${result.copied || 0} / スキップ ${result.skippedDup || 0} / 失敗 ${result.failed || 0}${delPart}`;
+
+    const elLog = el('div', { class: 'log' });
+    const addLine = (text, cls) => elLog.appendChild(el('div', { class: cls || '' }, text));
+    addLine('（実行済みの取り込み結果を表示しています。コピーは再実行されません）', 'skip');
+    for (const [t, p] of Object.entries(state.targets || {})) addLine(`出力先 [${t}]: ${p}`, 'ok');
+    for (const f of (result.failures || [])) addLine('✗ ' + f.file + ': ' + f.error, 'err');
+    for (const w of (result.warnings || [])) addLine('⚠ ' + w.file + ': ' + w.error, 'warn');
+
+    const backBtn = el('button', { class: 'ghost', onclick: () => {
+      state.ingestResult = null;
+      state.goto('preview');
+    }}, '← プレビューへ戻る');
+    const nextBtn = el('button', { class: 'primary', disabled: (result.dicomCandidates || []).length === 0,
+      onclick: () => state.goto('dicom') }, '次へ：DICOM送信 →');
+    const doneBtn = el('button', { class: 'ghost', onclick: () => state.goto('done') }, '完了画面へ');
+
+    const bar = el('div', { class: 'progress-bar' },
+      el('div', { class: 'fill', style: { width: result.cancelled ? '0%' : '100%' } }));
+
+    mount.replaceChildren(el('div', { class: 'card' },
+      el('h2', null, 'コピー進捗（実行済み）'),
+      el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)' } }, statusText),
+      bar,
+      el('h3', null, 'ログ'),
+      elLog,
+      el('div', { class: 'actions between' },
+        backBtn,
+        el('div', null, doneBtn, ' ', nextBtn),
+      ),
+    ));
   }
 
   return { render };
