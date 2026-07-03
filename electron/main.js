@@ -202,4 +202,32 @@ app.on('window-all-closed', () => {
   if (!isMac) app.quit();
 });
 
+// 取り込み実行中の終了ガード:
+// コピー途中でプロセスが死ぬと、書きかけの動画が正規のファイル名で患者フォルダに残る
+// （後から見ると完全なデータに見える）ため、必ず確認を挟む。
+// 「終了する」を選んだ場合も即死せず、中断処理（書きかけ dst の削除・DB flush）を待ってから終了する。
+let quitApproved = false;
+app.on('before-quit', (e) => {
+  if (quitApproved) return;
+  const ingest = require('./ingest-handler');
+  if (!ingest.isIngestBusy()) return;
+  e.preventDefault();
+  const choice = dialog.showMessageBoxSync(mainWindow, {
+    type: 'warning',
+    buttons: ['取り込みを続ける', '中断して終了'],
+    defaultId: 0,
+    cancelId: 0,
+    title: 'データ取り込み中です',
+    message: 'データ取り込みが実行中です',
+    detail: '今終了するとコピーは中断されます（書きかけのファイルは自動削除されます）。\n取り込みの完了を待つことをおすすめします。',
+  });
+  if (choice === 1) {
+    (async () => {
+      try { await ingest.cancelAndWaitIdle(30000); } catch (_) {}
+      quitApproved = true;
+      app.quit();
+    })();
+  }
+});
+
 module.exports = { getMainWindow: () => mainWindow };

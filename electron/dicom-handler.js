@@ -215,6 +215,18 @@ ipcMain.handle('dicom:sendStudy', async (_e, args = {}) => {
 
 ipcMain.handle('dicom:queueFailure', async (_e, args = {}) => {
   if (!args.target || !args.patient) return { ok: false, error: 'invalid args' };
+  // 同じフォルダの失敗記録が既にあれば、新規追加せず attempts を増やす
+  // （送信リトライのたびにキューが際限なく増えるのを防ぐ）
+  const existing = db.listPendingDicom().find(
+    (it) => (it.dstPath || it.dst_path) === args.target
+  );
+  if (existing && existing.id != null) {
+    db.updatePendingDicom(existing.id, {
+      attempts: (existing.attempts || 0) + 1,
+      lastError: args.error || existing.lastError || existing.last_error || null,
+    });
+    return { ok: true, deduped: true };
+  }
   db.queueDicom({
     dstPath: args.target,
     patientId: args.patient.id || '',
@@ -227,6 +239,14 @@ ipcMain.handle('dicom:queueFailure', async (_e, args = {}) => {
 
 ipcMain.handle('dicom:listPending', async () => {
   return { ok: true, items: db.listPendingDicom() };
+});
+
+// 再送成功時・ユーザー操作でキューから削除する
+ipcMain.handle('dicom:removePending', async (_e, args = {}) => {
+  const id = args.id;
+  if (!Number.isInteger(id)) return { ok: false, error: 'invalid id' };
+  db.updatePendingDicom(id, { remove: true });
+  return { ok: true };
 });
 
 module.exports = { generateUID };

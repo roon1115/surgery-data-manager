@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('App', {
     cancel: () => ipcRenderer.invoke('ingest:cancel'),
     ejectVolume: (volumePath) => ipcRenderer.invoke('ingest:ejectVolume', { volumePath }),
     checkDuplicates: (files) => ipcRenderer.invoke('ingest:checkDuplicates', { files }),
+    cancelCheck: () => ipcRenderer.invoke('ingest:cancelCheck'),
     onProgress: (cb) => {
       const listener = (_e, data) => cb(data);
       ipcRenderer.on('ingest:progress', listener);
@@ -54,6 +55,7 @@ contextBridge.exposeInMainWorld('App', {
     sendStudy: (args) => ipcRenderer.invoke('dicom:sendStudy', args),
     queueFailure: (args) => ipcRenderer.invoke('dicom:queueFailure', args),
     listPending: () => ipcRenderer.invoke('dicom:listPending'),
+    removePending: (id) => ipcRenderer.invoke('dicom:removePending', { id }),
   },
 
   updater: {

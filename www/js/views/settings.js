@@ -49,6 +49,11 @@ window.Views.settings = (function() {
     const rBronchoscope = makeTypeFolderRow('bronchoscope', '気管支鏡');
     const rEndoscope = makeTypeFolderRow('endoscope', '内視鏡');
 
+    // コピー後の読み戻し照合（NAS 宛では取り込み時間の約半分を占めるため OFF にできる。
+    // ただし「コピー後削除」がONの種別ではこの設定に関わらず必ず照合する）
+    const verifyCb = el('input', { type: 'checkbox' });
+    verifyCb.checked = cfg.verifyAfterCopy !== false;
+
     // 除外ボリューム: チェックすると取り込み元画面の検出一覧から外れる
     const excludedVolumesEl = el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)' } }, '読み込み中...');
     const excludedVolumesState = new Set((cfg.excludedVolumes || []));
@@ -179,6 +184,7 @@ window.Views.settings = (function() {
           endoscope: rEndoscope.deleteCb.checked,
         },
         excludedVolumes: Array.from(excludedVolumesState),
+        verifyAfterCopy: verifyCb.checked,
       };
       await window.App.settings.save(partial);
       state.settings = await window.App.settings.get();
@@ -194,6 +200,7 @@ window.Views.settings = (function() {
       rLaparoscope.input, rLaparoscope.browseBtn, rLaparoscope.enabledCb, rLaparoscope.deleteCb,
       rBronchoscope.input, rBronchoscope.browseBtn, rBronchoscope.enabledCb, rBronchoscope.deleteCb,
       rEndoscope.input, rEndoscope.browseBtn, rEndoscope.enabledCb, rEndoscope.deleteCb,
+      verifyCb,
       refreshExcludedVolumesBtn,
     ];
 
@@ -330,6 +337,16 @@ window.Views.settings = (function() {
           makeRow('内視鏡', rEndoscope),
         );
       })(),
+
+      el('h3', null, 'コピー後の読み戻し照合'),
+      el('label', { class: 'checkbox', style: { alignItems: 'flex-start' } },
+        verifyCb,
+        el('span', { style: { marginLeft: '6px', fontSize: '13px' } }, 'コピー後にコピー先を読み戻してハッシュ照合する（推奨）'),
+      ),
+      el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginTop: '4px', marginBottom: '6px' } },
+        'OFF にすると NAS への取り込みが大幅に速くなりますが、コピー直後のデータ破損検出が取り込み時ではなく後から見た時になります。',
+        el('br'),
+        '「コピー後削除」がONの種別では、この設定に関わらず必ず照合します（元データが残らないため）。'),
 
       el('h3', null, '自動アップデート'),
       el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginBottom: '6px' } },

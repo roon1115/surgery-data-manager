@@ -50,37 +50,18 @@ window.Views.dicom = (function() {
     const skipBtn = el('button', { class: 'ghost', onclick: () => state.goto('done') }, '完了画面へ');
     const backBtn = el('button', { class: 'ghost', onclick: () => state.goto('ingest') }, '← 戻る');
 
-    sendBtn.onclick = async () => {
-      const cfg = state.settings || await window.App.settings.get();
-      if (!cfg.dicom.host) {
-        U.modal({ title: '設定不備', body: 'DICOM接続先（Host）が未設定です。設定画面で入力してください。' });
-        return;
-      }
-      const selected = checkboxes
-        .map((cb, i) => cb.checked ? candidates[i] : null)
-        .filter(Boolean);
-      if (selected.length === 0) {
-        U.modal({ title: '対象なし', body: '送信する写真にチェックを入れてください。' });
-        return;
-      }
+    const setButtonsBusy = (busy) => {
+      sendBtn.disabled = busy;
+      skipBtn.disabled = busy;
+      backBtn.disabled = busy;
+    };
 
-      sendBtn.disabled = true;
-      skipBtn.disabled = true;
-      backBtn.disabled = true;
-
-      const total = selected.length;
+    // ==== 送信コア（通常送信と再送キューの両方から使う）====
+    // files: [{path, name}] / 返り値: { ok, sent, decodeFailed, sendFailed, firstError, total }
+    async function runSend(files, patientArg, examArg) {
+      const total = files.length;
       const batchCount = Math.ceil(total / BATCH_SIZE);
       logLine(`送信開始: ${total} 枚を ${batchCount} バッチ（最大 ${BATCH_SIZE} 枚/バッチ）に分割`, 'ok');
-
-      const studyDateIso = (state.patient.date || U.todayIso()) + 'T' + new Date().toTimeString().slice(0, 8);
-      const patientArg = {
-        id: state.patient.id.replace(/[^\x20-\x7E]/g, ''),
-        name: state.patient.nameRomaji.replace(/[^\x20-\x7E]/g, ''),
-      };
-      const examArg = {
-        datetime: studyDateIso,
-        desc: state.patient.procedure.replace(/[^\x20-\x7E]/g, ''),
-      };
 
       let studyUID = null;
       let seriesUID = null;
@@ -89,9 +70,18 @@ window.Views.dicom = (function() {
       let totalSendFailed = 0;
       let firstError = null;
 
+      // 進捗は「1枚 = デコード0.5 + 送信0.5」の単一式で単調に増やす
+      // （フェーズごとの別計算だとバッチ境界で逆戻りして見える）
+      let decodedCount = 0;   // デコード処理済み（成功/失敗とも）
+      let sendProcessed = 0;  // 送信処理済み（成功/失敗とも）
+      const updateBar = () => {
+        const p = ((decodedCount * 0.5 + sendProcessed * 0.5) / total) * 100;
+        elProgress.firstElementChild.style.width = Math.min(100, p).toFixed(1) + '%';
+      };
+
       for (let batchIdx = 0; batchIdx < batchCount; batchIdx++) {
         const batchStart = batchIdx * BATCH_SIZE;
-        const batch = selected.slice(batchStart, batchStart + BATCH_SIZE);
+        const batch = files.slice(batchStart, batchStart + BATCH_SIZE);
 
         // === デコードフェーズ ===
         const decodedBatch = [];
@@ -100,9 +90,6 @@ window.Views.dicom = (function() {
           const overallIdx = batchStart + i;
           elStatus.textContent = `バッチ ${batchIdx + 1}/${batchCount}　デコード中 ${overallIdx + 1}/${total}`;
           elSubStatus.textContent = c.name;
-          // 進捗バー: デコードを 0〜50%、送信を 50〜100% としてバッチごとに加算
-          const decodeProgress = (overallIdx + 1) / total * 50;
-          elProgress.firstElementChild.style.width = decodeProgress.toFixed(1) + '%';
           try {
             const dec = await window.Decode.decodeToRgb(c.path);
             decodedBatch.push(dec);
@@ -110,11 +97,14 @@ window.Views.dicom = (function() {
             totalDecodeFailed++;
             logLine('✗ decode失敗: ' + c.name + ' — ' + (e?.message || e), 'err');
           }
+          decodedCount = overallIdx + 1;
+          updateBar();
           await yieldToUI();
         }
 
         if (decodedBatch.length === 0) {
           logLine(`バッチ ${batchIdx + 1} はデコード成功画像なし、スキップ`, 'warn');
+          sendProcessed += 0; // デコード全滅バッチは送信対象なし
           continue;
         }
 
@@ -146,9 +136,8 @@ window.Views.dicom = (function() {
           logLine(`✗ バッチ ${batchIdx + 1}: ${failed} 枚失敗 — ${r.error || '不明'}`, 'err');
         }
 
-        // 進捗バー更新: デコード50% + 送信進捗（残り50%）
-        const sendProgress = 50 + ((batchIdx + 1) / batchCount) * 50;
-        elProgress.firstElementChild.style.width = sendProgress.toFixed(1) + '%';
+        sendProcessed += decodedBatch.length;
+        updateBar();
 
         // メモリ解放: バッチを明示的に空に → GC が走りやすくなる
         decodedBatch.length = 0;
@@ -156,35 +145,168 @@ window.Views.dicom = (function() {
       }
 
       elProgress.firstElementChild.style.width = '100%';
-      const r = { ok: totalSendFailed === 0 && totalSent > 0, sent: totalSent, error: firstError };
+      return {
+        ok: totalSendFailed === 0 && totalDecodeFailed === 0 && totalSent > 0,
+        sent: totalSent,
+        decodeFailed: totalDecodeFailed,
+        sendFailed: totalSendFailed,
+        firstError,
+        total,
+      };
+    }
+
+    const asciiStrip = (s) => String(s || '').replace(/[^\x20-\x7E]/g, '');
+
+    sendBtn.onclick = async () => {
+      const cfg = state.settings || await window.App.settings.get();
+      if (!cfg.dicom.host) {
+        U.modal({ title: '設定不備', body: 'DICOM接続先（Host）が未設定です。設定画面で入力してください。' });
+        return;
+      }
+      const selected = checkboxes
+        .map((cb, i) => cb.checked ? candidates[i] : null)
+        .filter(Boolean);
+      if (selected.length === 0) {
+        U.modal({ title: '対象なし', body: '送信する写真にチェックを入れてください。' });
+        return;
+      }
+
+      setButtonsBusy(true);
+
+      const studyDateIso = (state.patient.date || U.todayIso()) + 'T' + new Date().toTimeString().slice(0, 8);
+      const patientArg = {
+        id: asciiStrip(state.patient.id),
+        name: asciiStrip(state.patient.nameRomaji),
+      };
+      const examArg = {
+        datetime: studyDateIso,
+        desc: asciiStrip(state.patient.procedure),
+      };
+
+      const r = await runSend(selected, patientArg, examArg);
+
       if (r.ok) {
-        elStatus.textContent = `✓ 送信成功（${totalSent} / ${total} 枚）`;
+        elStatus.textContent = `✓ 送信成功（${r.sent} / ${r.total} 枚）`;
         elSubStatus.textContent = '';
-        logLine(`完了: ${totalSent} 枚送信成功`, 'ok');
+        logLine(`完了: ${r.sent} 枚送信成功`, 'ok');
       } else {
-        elStatus.textContent = `送信完了（成功 ${totalSent} / 失敗 ${totalSendFailed} / 対象 ${total}）`;
-        elSubStatus.textContent = firstError ? `初回エラー: ${firstError}` : '';
-        logLine(`失敗: ${totalSendFailed} 枚 — 初回エラー: ${firstError || '不明'}`, 'err');
-        if (totalSendFailed > 0) {
+        elStatus.textContent = `送信完了（成功 ${r.sent} / 失敗 ${r.sendFailed} / 対象 ${r.total}）`;
+        elSubStatus.textContent = r.firstError ? `初回エラー: ${r.firstError}` : '';
+        if (r.sendFailed > 0) {
+          logLine(`失敗: ${r.sendFailed} 枚 — 初回エラー: ${r.firstError || '不明'}`, 'err');
           await window.App.dicom.queueFailure({
             target: state.targetFolder,
             patient: state.patient,
+            error: r.firstError || null,
           });
-          logLine('失敗分を再送キューに登録しました', 'warn');
+          logLine('失敗を記録しました（次回この画面を開いたとき再送できます）', 'warn');
+          refreshPending();
         }
       }
-      if (totalDecodeFailed > 0) {
-        logLine(`デコード失敗: ${totalDecodeFailed} 枚`, 'warn');
+      if (r.decodeFailed > 0) {
+        logLine(`デコード失敗: ${r.decodeFailed} 枚`, 'warn');
       }
-      state.dicomResult = r;
+      state.dicomResult = { ok: r.ok, sent: r.sent, error: r.firstError };
 
+      setButtonsBusy(false);
       sendBtn.disabled = true;
-      skipBtn.disabled = false;
-      backBtn.disabled = false;
       skipBtn.textContent = '完了 →';
       skipBtn.classList.remove('ghost');
       skipBtn.classList.add('primary');
     };
+
+    // ==== 過去の送信失敗（再送キュー）====
+    // 以前は「キューに登録」しか実装されておらず、再送する手段が無かった。
+    // ここで一覧表示し、フォルダ内の写真を新しい Study として再送するか、記録を削除できる。
+    const pendingSection = el('div', null);
+    async function refreshPending() {
+      const r = await window.App.dicom.listPending().catch(() => null);
+      const items = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+      pendingSection.innerHTML = '';
+      if (items.length === 0) return;
+
+      const list = el('ul', { class: 'file-list' });
+      for (const it of items) {
+        const label = `${it.patientName || it.patient_name || '(名前なし)'} / ${it.procedure || '-'} / ${it.studyDate || it.study_date || '-'}`
+          + `（失敗 ${(it.attempts || 0) + 1} 回目の記録）`;
+        const folder = it.dstPath || it.dst_path || '';
+        const resendBtn = el('button', { class: 'ghost' }, '再送...');
+        const removeBtn = el('button', { class: 'ghost' }, '記録を削除');
+
+        resendBtn.onclick = () => {
+          U.modal({
+            title: '失敗分を再送しますか？',
+            body: el('div', null,
+              el('p', null, '以下のフォルダ内の写真を、新しい Study として送信します：'),
+              el('div', { class: 'preview' }, folder),
+              el('p', { style: { fontSize: '12px', color: 'var(--warn, #b45309)' } },
+                '⚠ 前回一部が送信済みだった場合、その写真は送信先に重複して登録されます。'),
+            ),
+            okText: '再送する',
+            cancelText: 'キャンセル',
+            onOk: async () => {
+              // 通常送信が完了済みで sendBtn が意図的に無効なら、再送後もそれを維持する
+              const sendBtnWasDisabled = sendBtn.disabled;
+              setButtonsBusy(true);
+              resendBtn.disabled = true;
+              try {
+                const scan = await window.App.ingest.scanSource({ sourcePath: folder });
+                if (!scan.ok) {
+                  logLine('✗ 再送: フォルダを読めません — ' + (scan.error || folder), 'err');
+                  return;
+                }
+                const files = (scan.files || [])
+                  .filter(f => window.Decode.isCanvasSupportedExt(f.ext))
+                  .map(f => ({ path: f.path, name: f.relPath || f.path }));
+                if (files.length === 0) {
+                  logLine('✗ 再送: 送信可能な画像がフォルダにありません — ' + folder, 'err');
+                  return;
+                }
+                const patientArg = { id: asciiStrip(it.patientId || it.patient_id), name: asciiStrip(it.patientName || it.patient_name) };
+                const dateIso = (it.studyDate || it.study_date || U.todayIso()) + 'T' + new Date().toTimeString().slice(0, 8);
+                const examArg = { datetime: dateIso, desc: asciiStrip(it.procedure) };
+                const rr = await runSend(files, patientArg, examArg);
+                if (rr.ok) {
+                  logLine(`✓ 再送成功（${rr.sent} 枚）。記録をキューから削除します`, 'ok');
+                  await window.App.dicom.removePending(it.id);
+                } else {
+                  logLine(`✗ 再送でも失敗（成功 ${rr.sent} / 失敗 ${rr.sendFailed + rr.decodeFailed}）。記録は残します`, 'err');
+                }
+              } finally {
+                setButtonsBusy(false);
+                sendBtn.disabled = sendBtnWasDisabled;
+                resendBtn.disabled = false;
+                refreshPending();
+              }
+            },
+          });
+        };
+
+        removeBtn.onclick = () => {
+          U.modal({
+            title: '失敗記録を削除しますか？',
+            body: '再送せずに記録だけを消します。写真自体は保存先フォルダに残っています。',
+            okText: '削除',
+            cancelText: 'キャンセル',
+            onOk: async () => {
+              await window.App.dicom.removePending(it.id);
+              refreshPending();
+            },
+          });
+        };
+
+        list.appendChild(el('li', null,
+          el('div', { style: { flex: '1', fontSize: '12px' } },
+            el('div', null, label),
+            el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', fontFamily: 'SF Mono, monospace' } }, folder),
+          ),
+          resendBtn, ' ', removeBtn,
+        ));
+      }
+      pendingSection.appendChild(el('div', { class: 'banner warn', style: { marginTop: '8px' } },
+        `過去に送信に失敗した記録が ${items.length} 件あります。再送するか、不要なら記録を削除してください。`));
+      pendingSection.appendChild(list);
+    }
 
     const cfg = state.settings || await window.App.settings.get();
     const dicomInfo = el('div', { class: 'banner ok' },
@@ -197,6 +319,7 @@ window.Views.dicom = (function() {
       el('div', { class: 'banner warn' },
         `PatientID = "${state.patient.id}"、PatientName = "${state.patient.nameRomaji}"（英数）として送信します。`
       ),
+      pendingSection,
       el('div', { class: 'row', style: { alignItems: 'center', marginTop: '8px', marginBottom: '4px' } },
         el('h3', { style: { margin: 0, flex: 1 } }, `送信候補（${candidates.length} 枚）`),
         el('div', { class: 'checkbox', style: { fontSize: '12px', flex: 'none' } }, allCb, ' 一括選択'),
@@ -213,6 +336,7 @@ window.Views.dicom = (function() {
       ),
     );
     mount.replaceChildren(root);
+    refreshPending();
   }
 
   return { render };

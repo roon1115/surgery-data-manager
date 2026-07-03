@@ -22,7 +22,16 @@ function init() {
   try {
     loaded = JSON.parse(fs.readFileSync(histFile, 'utf8'));
     if (!Array.isArray(loaded.patients)) loaded.patients = [];
-  } catch (_) {
+  } catch (e) {
+    // ファイルが存在するのに parse に失敗 → 破損。無言で空データ上書きせず退避してから初期化
+    // （放置すると次の persist() で破損ファイルが空履歴に置き換わり、患者履歴が無言で全消失する）
+    if (fs.existsSync(histFile)) {
+      try {
+        const bak = histFile + '.corrupt-' + Date.now() + '.bak';
+        fs.copyFileSync(histFile, bak);
+        console.error('[history] history.json の読み込みに失敗したため退避しました:', bak, e?.message || e);
+      } catch (_) {}
+    }
     loaded = { patients: [] };
   }
   return loaded;
@@ -31,7 +40,11 @@ function init() {
 function persist() {
   if (!histFile || !loaded) return;
   try {
-    fs.writeFileSync(histFile, JSON.stringify(loaded, null, 2));
+    // アトミック書き込み（tmp → rename）。書き込み途中のクラッシュで
+    // history.json が途中切れになって履歴が全消失するのを防ぐ。
+    const tmp = histFile + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(loaded, null, 2));
+    fs.renameSync(tmp, histFile);
   } catch (e) {
     console.error('[history] persist failed:', e?.message || e);
   }

@@ -204,11 +204,17 @@ window.Views.source = (function() {
         return;
       }
 
-      // 進捗モーダル（キャンセル/OK非表示の固定型）
+      // 進捗モーダル（キャンセル可能）
       const progressLabel = el('div', { style: { fontSize: '13px', marginBottom: '6px' } }, '重複ファイルをチェック中...');
       const progressDetail = el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)' } }, `0 / ${filesToCheck.length}`);
       const progressBar = el('div', { class: 'progress-bar', style: { marginTop: '8px' } },
         el('div', { class: 'fill', style: { width: '0%' } }));
+      const cancelCheckBtn = el('button', { class: 'ghost', style: { marginTop: '10px' } }, 'キャンセル');
+      cancelCheckBtn.onclick = async () => {
+        cancelCheckBtn.disabled = true;
+        cancelCheckBtn.textContent = '中断中...';
+        await window.App.ingest.cancelCheck();
+      };
       const m = document.getElementById('modal');
       const content = document.getElementById('modal-content');
       const okBtn = document.getElementById('modal-ok');
@@ -218,6 +224,7 @@ window.Views.source = (function() {
       content.appendChild(progressLabel);
       content.appendChild(progressDetail);
       content.appendChild(progressBar);
+      content.appendChild(cancelCheckBtn);
       okBtn.style.display = 'none';
       cancelBtn.style.display = 'none';
       m.classList.remove('hidden');
@@ -231,11 +238,25 @@ window.Views.source = (function() {
         }
       });
 
-      const r = await window.App.ingest.checkDuplicates(filesToCheck);
-      off();
+      // モーダルの後片付けは try/finally で保証する。
+      // これが無いと main 側の例外時にボタンのないモーダルが画面を覆ったまま操作不能になる
+      let r = null;
+      try {
+        r = await window.App.ingest.checkDuplicates(filesToCheck);
+      } catch (e) {
+        r = { ok: false, error: String(e?.message || e) };
+      } finally {
+        off();
+        okBtn.style.display = '';
+        cancelBtn.style.display = '';
+        m.classList.add('hidden');
+      }
 
-      // 結果を file にマージ
-      if (r.ok && Array.isArray(r.results)) {
+      // ユーザーがキャンセルした場合はこの画面に留まる（フラグ無しで先へ進めない）
+      if (r && r.cancelled) return;
+
+      if (r && r.ok && Array.isArray(r.results)) {
+        // 結果を file にマージ
         r.results.forEach((res, i) => {
           if (!res) return;
           const owner = ownerLookup[i];
@@ -245,14 +266,26 @@ window.Views.source = (function() {
           if (f.alreadyImported) f.selected = false;
           else if (f.selected === undefined) f.selected = true;
         });
+        state.lastDuplicateCount = r.duplicateCount || 0;
+        state.goto('preview');
+        return;
       }
-      state.lastDuplicateCount = r.duplicateCount || 0;
 
-      okBtn.style.display = '';
-      cancelBtn.style.display = '';
-      m.classList.add('hidden');
-
-      state.goto('preview');
+      // チェック失敗: 黙って進むと「既取込は自動除外済み」というプレビュー表示と
+      // 実態が食い違う（全ファイルが再コピー対象になる）ため、ユーザーに選ばせる
+      state.lastDuplicateCount = 0;
+      U.modal({
+        title: '重複チェック失敗',
+        body: el('div', null,
+          el('p', null, '重複チェックを完了できませんでした: ' + (r?.error || '不明なエラー')),
+          el('p', { style: { fontSize: '12px', color: 'var(--fg-mute)' } },
+            'このまま進むと、取り込み済みのファイルも「既取込」と表示されず再コピー対象になります'
+            + '（コピー時の差分判定は引き続き働くため、二重コピー自体は発生しません）。'),
+        ),
+        okText: 'このまま進む',
+        cancelText: 'やり直す',
+        onOk: () => state.goto('preview'),
+      });
     };
 
     // 「次へ」: バリデーション → データ種別の最終確認ポップアップ → proceedToCheck
