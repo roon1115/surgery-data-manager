@@ -158,10 +158,27 @@ window.Views.dicom = (function() {
 
     const asciiStrip = (s) => String(s || '').replace(/[^\x20-\x7E]/g, '');
 
+    // 送信ロック: onclick の最初の同期区間で取得する。
+    // 自動送信（render 直後）と手動クリック／二重クリックが await 窓で重なると、
+    // 同じ候補に対して runSend が並走し、別 Study として PACS に重複登録されるため。
+    let sendLocked = false;
+
     sendBtn.onclick = async () => {
+      if (sendLocked) return;
+      sendLocked = true;
+      setButtonsBusy(true);
+      try {
+        await doSend();
+      } finally {
+        sendLocked = false;
+      }
+    };
+
+    async function doSend() {
       const cfg = state.settings || await window.App.settings.get();
       if (!cfg.dicom.host) {
         U.modal({ title: '設定不備', body: 'DICOM接続先（Host）が未設定です。設定画面で入力してください。' });
+        setButtonsBusy(false);
         return;
       }
       const selected = checkboxes
@@ -169,10 +186,9 @@ window.Views.dicom = (function() {
         .filter(Boolean);
       if (selected.length === 0) {
         U.modal({ title: '対象なし', body: '送信する写真にチェックを入れてください。' });
+        setButtonsBusy(false);
         return;
       }
-
-      setButtonsBusy(true);
 
       const studyDateIso = (state.patient.date || U.todayIso()) + 'T' + new Date().toTimeString().slice(0, 8);
       const patientArg = {
@@ -234,7 +250,7 @@ window.Views.dicom = (function() {
         skipBtn.classList.remove('ghost');
         skipBtn.classList.add('primary');
       }
-    };
+    }
 
     // ==== 過去の送信失敗（再送キュー）====
     // 以前は「キューに登録」しか実装されておらず、再送する手段が無かった。

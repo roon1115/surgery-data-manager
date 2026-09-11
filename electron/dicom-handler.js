@@ -144,8 +144,23 @@ ipcMain.handle('dicom:echo', async (_e, args = {}) => {
   });
 });
 
+// main 側の排他: 同時に走る C-STORE 送信は1系列だけ。
+// レンダラのロックをすり抜けた多重呼び出し（再描画・二重クリック）で同じ画像が
+// 別 Study として PACS に重複登録されるのを止める。バッチは直列 await なので影響しない。
+let sendStudyBusy = false;
+
 ipcMain.handle('dicom:sendStudy', async (_e, args = {}) => {
   if (!dimse) return { ok: false, error: 'dcmjs-dimse not installed' };
+  if (sendStudyBusy) return { ok: false, sent: 0, error: '別のDICOM送信が実行中です' };
+  sendStudyBusy = true;
+  try {
+    return await sendStudyImpl(args);
+  } finally {
+    sendStudyBusy = false;
+  }
+});
+
+async function sendStudyImpl(args) {
   const cfg = settings.getAll().dicom;
   const host = (args.host || cfg.host || '').trim();
   const port = parseInt(args.port ?? cfg.port, 10);
@@ -211,7 +226,7 @@ ipcMain.handle('dicom:sendStudy', async (_e, args = {}) => {
 
   // 呼出側がバッチ送信を続けられるよう、生成済 UID を必ず返す
   return { ...result, studyUID, seriesUID };
-});
+}
 
 ipcMain.handle('dicom:queueFailure', async (_e, args = {}) => {
   if (!args.target || !args.patient) return { ok: false, error: 'invalid args' };
