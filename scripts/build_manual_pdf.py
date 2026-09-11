@@ -29,8 +29,8 @@ JP_FONT_MIN = 'HeiseiMin-W3'
 
 SHOT_DIR = '/tmp/sdm-screenshots'
 OUTPUT_PDF = '/Users/macbookns/Dropbox/Manus-Claude/手術データ管理アプリ/dist/画像転送マニュアル.pdf'
-VERSION = 'v0.3.16'
-PUB_DATE = '2026-07-02'
+VERSION = 'v0.3.18'
+PUB_DATE = '2026-09-12'
 
 styles = getSampleStyleSheet()
 style_title = ParagraphStyle('JPTitle', parent=styles['Title'], fontName=JP_FONT, fontSize=24,
@@ -300,7 +300,9 @@ def build_pdf():
     story.append(Paragraph('3.5 ステップ5: DICOM 送信', style_step))
     story.append(Paragraph(
         '種別「手術写真」が取り込まれた場合のみ DICOM 送信画面が表示されます。'
-        '送信対象を確認し「DICOM 送信を実行」で StellaDICOM へ C-STORE 送信します。',
+        '<b>v0.3.18 から、コピー完了後は確認なしで自動的に DICOM 送信画面へ進み、送信が始まります</b>'
+        '（StellaDICOM へ C-STORE 送信）。送信中は設定画面へ移動できません。'
+        'コピーを「中断」した場合だけは自動送信されず、従来どおり「DICOM 送信を実行」ボタンで送ります。',
         style_body))
     story.append(Paragraph(
         '<b>大量送信時</b>（1000 枚など）は内部で <b>20 枚ずつのバッチ処理</b> に分割され、'

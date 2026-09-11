@@ -34,6 +34,9 @@
       state._ejectConfirmShown = false;   // 完了画面の自動取り外し確認を次セッションでも出す
       state.showAlreadyImported = false;  // プレビューの「既取込を表示」も初期状態に戻す
       state.lastDuplicateCount = 0;
+      state.lastCheckErrorCount = 0;
+      state.autoDicomSend = false;        // コピー完了→DICOM自動送信フラグも初期化
+      state.dicomSending = false;
     },
   };
 
@@ -64,6 +67,11 @@
     // ユーザーが見られなくなる（進捗リスナーも宙に浮く）ため、実行中は遷移させない
     if (state.ingestRunning) {
       U.modal({ title: '取り込み実行中', body: 'コピーの実行中は設定画面を開けません。完了または中断してから操作してください。' });
+      return;
+    }
+    // DICOM 送信中も同様（送信ビューが破棄されると結果・失敗ログが見えなくなり、重複送信の原因になる）
+    if (state.dicomSending) {
+      U.modal({ title: 'DICOM送信中', body: 'DICOM送信の実行中は設定画面を開けません。送信が終わってから操作してください。' });
       return;
     }
     state.goto('settings');

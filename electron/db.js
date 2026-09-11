@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const fsp = require('fs/promises');
 const { app } = require('electron');
 
 // SQLite ネイティブモジュールは Electron 最新版との互換性問題を避けるため未使用。
@@ -184,25 +185,217 @@ function hasHash(sha256) {
   return !!jsonFallback.files[sha256];
 }
 
+// ---- stat 逆引きインデックス（重複チェック高速化） ----
+// 同じSDカードを挿し直すたびに、既に取り込み済みのファイルまでゼロから全量ハッシュしていた。
+// 記録には size / mtime / srcPath が入っているので、そこから sha256 を逆引きできるようにする。
+//   キー: basename(srcPath) + size + floor(mtimeMs)
+//   - フルパスをキーにしない理由: SD の再マウントで /Volumes/Untitled → /Volumes/Untitled 1 の
+//     ように変わり、狙っているシナリオ（同一カードの再挿入）でことごとく外れるため。
+//   - size+mtime だけにしない理由: FAT32 の 4GiB 分割動画は同一サイズになりやすく、
+//     FAT の2秒 mtime 粒度と重なって別ファイル同士が衝突しうるため。
+//   値 null = 同じキーに別々の sha が複数ある（曖昧）→ そのキーは使わない。
+// 重要: このヒットは「内容を読んで確かめた値」ではない（名前・サイズ・更新時刻からの推定）。
+// 呼び出し側（ingest-handler の経路1）は採用前に src と既存コピーの端点バイト比較で裏を取るが、
+// それでも全量一致の証明ではない。元ファイルの削除が絡む判断には決して使わず、
+// 呼び出し側で必ず実ハッシュに落とすこと。
+let statIndex = null;
+
+function statKey(name, size, mtimeMs) {
+  // 大文字小文字を無視するのは、同じカードが大小文字非依存の FS 経由で見えることがあるため。
+  // NFC 正規化は macOS(NFD) と SMB(NFC) で同じファイルが別キーにならないようにするため。
+  return String(name).normalize('NFC').toLowerCase() + ' ' + size + ' ' + Math.floor(mtimeMs);
+}
+
+// 1レコードをインデックスへ反映（初回構築と recordFile 後の増分更新で共用）。
+// size/mtime/srcPath が欠けた旧レコードは「その1件だけ」無視する
+// （1件の欠損でインデックス全体を捨てると、狙った高速化が丸ごと効かなくなるため）。
+function indexRecord(sha256, rec) {
+  if (!statIndex || !rec) return;
+  // sizeFromDst のレコードは size が「取り込み時の実測」ではなくコピー先を後から stat した
+  // 補完値。既にコピー先が壊れて（サイズが変わって）いた場合、その誤ったサイズが逆引きキーの
+  // 一部になり「壊れた dst のサイズと一致する src」を既取込と誤判定しうる。索引には載せない。
+  if (rec.sizeFromDst === true) return;
+  if (typeof rec.srcPath !== 'string' || !rec.srcPath) return;
+  if (typeof rec.size !== 'number' || !Number.isFinite(rec.size)) return;
+  if (typeof rec.mtime !== 'number' || !Number.isFinite(rec.mtime)) return;
+  const key = statKey(path.basename(rec.srcPath), rec.size, rec.mtime);
+  const cur = statIndex.get(key);
+  if (cur === undefined) statIndex.set(key, sha256);
+  else if (cur !== sha256) statIndex.set(key, null); // 同一キーに別の内容 → 曖昧なので不使用
+}
+
+// 名前+サイズ+更新時刻から取り込み済み sha256 を引く。ヒット無し・曖昧なら null。
+// 呼び出し側は生の basename をそのまま渡してよい（正規化はこの中で行う）。
+function findByStat({ name, size, mtimeMs } = {}) {
+  init();
+  if (db) {
+    // SQLite 経路（現状 Database=null で未使用）には逆引き用のインデックスが無い。
+    // ヒット無し扱い＝従来どおり全量ハッシュへフォールバックする。
+    return null;
+  }
+  if (typeof name !== 'string' || !name) return null;
+  if (typeof size !== 'number' || !Number.isFinite(size)) return null;
+  if (typeof mtimeMs !== 'number' || !Number.isFinite(mtimeMs)) return null;
+  if (!statIndex) {
+    statIndex = new Map();
+    for (const [sha, rec] of Object.entries(jsonFallback.files)) indexRecord(sha, rec);
+  }
+  const hit = statIndex.get(statKey(name, size, mtimeMs));
+  return typeof hit === 'string' ? hit : null;
+}
+
+// 残り予算 budgetMs 以内に stat する。取れなければ（エラー・予算切れとも）null。
+// 予算切れを待たずに諦めるのは、応答しない NAS/SMB マウントでは fsp.stat が
+// 分単位でハングすることがあり、そのままだと呼び出し側の時間予算（FILL_BUDGET_MS）が
+// 「次のファイルを取りに行くタイミング」でしか効かず、実質無制限に待たされるため。
+// タイマーは race 確定後に必ず clearTimeout する（イベントループに残さない）。
+function statWithin(p, budgetMs) {
+  if (!(budgetMs > 0)) return Promise.resolve(null);
+  let timer = null;
+  // stat 側の reject もここで null に畳む（race の敗者になっても未処理 rejection にしない）
+  const statP = fsp.stat(p).then((st) => st, () => null);
+  const timeoutP = new Promise((resolve) => { timer = setTimeout(() => resolve(null), budgetMs); });
+  return Promise.race([statP, timeoutP]).then(
+    (v) => { if (timer) clearTimeout(timer); return v; },
+    (e) => { if (timer) clearTimeout(timer); throw e; });
+}
+
+// size 未記録の旧レコードを、コピー先の実ファイルから補完する。補完できたサイズ or null。
+// 補完値は通常の {t:'file'} ジャーナル op として追記するので、旧バージョンでも再生できる。
+// NAS 上の stat は1件あたり数十msかかることがあり、記録件数ぶん同期実行するとメインプロセスが
+// 止まって UI が固まるため非同期版を使う（呼び出しは getKnownSizes の初回走査のみ）。
+// deadline: 呼び出し側（getKnownSizes）の時間予算の締切（epoch ms）。stat 1回がこれを
+// 超えて返らない場合は補完失敗として扱う。
+async function fillMissingSize(sha256, rec, deadline) {
+  if (!rec || typeof rec.dstPath !== 'string' || !rec.dstPath) return null;
+  const st = await statWithin(rec.dstPath, Number.isFinite(deadline) ? deadline - Date.now() : FILL_BUDGET_MS);
+  if (!st) return null;
+  if (!st.isFile() || typeof st.size !== 'number' || !Number.isFinite(st.size)) return null;
+  // sizeFromDst: この size は取り込み時の実測ではなく、後からコピー先を stat した補完値。
+  // 補完した時点でコピー先が既に壊れていた可能性を否定できないため、元ファイル削除前の
+  // ガード（ingest-handler のガード4）はこのフラグ付きレコードを stat 照合で信用せず、
+  // 従来どおり全量ハッシュで確認する。
+  const updated = { ...rec, size: st.size, sizeFromDst: true };
+  jsonFallback.files[sha256] = updated;
+  try {
+    appendOp({ t: 'file', sha256, rec: updated });
+  } catch (e) {
+    // 追記に失敗してもメモリ上の補完値は使える（次回起動時にまた補完を試みるだけ）。
+    // ここで例外を投げると重複チェック全体が失敗するので、サイズ補完は best-effort に留める。
+    console.error('[db] size 補完の記録に失敗:', e?.message || e);
+  }
+  // 索引には意図的に載せない（sizeFromDst のレコードは indexRecord 冒頭のガードで弾かれる）
+  return st.size;
+}
+
 // 記録済みファイルの全サイズ集合を返す（重複チェックのサイズ事前フィルタ用）。
 // 同じサイズの記録が1件も無いファイルは内容が一致しようがない＝重複になり得ないので、
 // ハッシュ計算（ファイル全読み）を省略できる。
 // サイズ不明の記録が混ざっている場合はフィルタとして使えないため null を返す（安全側）。
-function getKnownSizes() {
+//
+// メモ化: 全走査＋（旧レコードがあれば）NAS への stat を伴うため、取り込み/重複チェックの
+// たびに繰り返すと数千件規模で無視できないコストになる。初回だけ計算してキャッシュし、
+// 以後は recordFile 側の増分更新（knownSizesCache.add）で追随させる。
+let knownSizesCache = null;    // Set = 計算済み / null = 未計算 or 現在は使用不能
+// サイズ事前フィルタを諦めた場合の「次に再試行してよい時刻」（epoch ms。0 = 諦めていない）。
+// 以前はセッション固定の boolean だったが、それだと「NAS がマウントされる前にアプリを開いた」
+// だけでアプリを再起動するまで全量ハッシュに落ち続けた。失敗から SIZE_FILTER_RETRY_MS の間は
+// 即 null を返し、期限が切れたら1回だけ再試行する（NAS が後から来た環境は1分で自己回復する）。
+// 再試行1回のコストは補完の時間予算 FILL_BUDGET_MS が上限なので、恒久的に失敗する環境でも
+// 「1分あたり最大5秒」に有界（＝毎回の重複チェックが遅くなり続けることはない）。
+let sizeFilterRetryAfter = 0;
+const SIZE_FILTER_RETRY_MS = 60 * 1000;
+
+// レガシー（size 未記録）レコードの補完に使う並列数と時間予算。
+// 補完1件が NAS への stat 1回で、未記録レコードが数千件あると直列では分単位で待たされる。
+// 並列化しても終わらないほど古い/遅い環境では、待たせ続けるより「しばらくは
+// サイズ事前フィルタ無効（＝従来どおり全量ハッシュ）」に倒す方が体感が読める。
+// 成功した分の補完はジャーナルに追記済みなので、再試行時は残りから前進できる。
+const FILL_CONCURRENCY = 8;
+const FILL_BUDGET_MS = 5000;
+
+async function getKnownSizes() {
   init();
+  if (knownSizesCache) return knownSizesCache;
+  // 直近で補完に失敗/時間切れしたら、しばらくは走査せず即 null（＝従来どおり全量ハッシュ）。
+  // 期限が切れたら再試行する: 失敗の主因（NAS 未マウント・電源断）は時間で解消しうるため。
+  if (Date.now() < sizeFilterRetryAfter) return null;
+
   const sizes = new Set();
   if (db) {
     for (const row of db.prepare('SELECT size FROM files').all()) {
       if (typeof row.size !== 'number' || !Number.isFinite(row.size)) return null;
       sizes.add(row.size);
     }
+    knownSizesCache = sizes;
     return sizes;
   }
-  for (const r of Object.values(jsonFallback.files)) {
+  // size 未記録の旧レコードが1件でも混ざるとフィルタ全体が無効になり、
+  // 全ファイルの再ハッシュに逆戻りしてしまう。コピー先の実ファイルから補完して救う。
+  const missing = [];
+  for (const [sha, r] of Object.entries(jsonFallback.files)) {
     const s = r ? r.size : undefined;
-    if (typeof s !== 'number' || !Number.isFinite(s)) return null;
-    sizes.add(s);
+    if (typeof s === 'number' && Number.isFinite(s)) sizes.add(s);
+    else missing.push([sha, r]);
   }
+  if (missing.length > 0) {
+    const deadline = Date.now() + FILL_BUDGET_MS;
+    let next = 0;
+    let filled = 0;      // 補完に成功した件数（ログ用）
+    let failed = null;   // 補完不能だった最初のレコード [sha, rec]
+    let timedOut = false;
+    async function fillWorker() {
+      while (true) {
+        if (failed || timedOut) return;              // 1件でも諦めが確定したら以降は無駄
+        // キュー枯渇の判定を締切より先に行う。逆にすると「全件の補完に成功したのに、
+        // その stat が予算を超えて返った」だけで timedOut になり、完成した Set を捨てて
+        // フィルタ無効（＝全量ハッシュ）に落ちてしまう。
+        const k = next++;
+        if (k >= missing.length) return;
+        if (Date.now() >= deadline) { timedOut = true; return; }
+        const [sha, r] = missing[k];
+        const s = await fillMissingSize(sha, r, deadline);
+        if (s === null) {
+          // 予算を使い切っての失敗（ハングしたマウント等）は「時間切れ」、
+          // それ以外（dst 消失・権限なし）は「補完不能」として区別する。ログの文言が変わるだけで
+          // 以後の扱い（フィルタ無効化＋再試行ラッチ）は同じ。
+          if (Date.now() >= deadline) timedOut = true;
+          else if (!failed) failed = [sha, r];
+          return;
+        }
+        filled++;
+        sizes.add(s);
+      }
+    }
+    await Promise.all(
+      Array.from({ length: Math.min(FILL_CONCURRENCY, missing.length) }, () => fillWorker()));
+
+    // 以後しばらく重複チェック・取り込みが全量ハッシュに戻り、大容量カードで数分遅くなる。
+    // 無言で遅くなる原因が分からなくなるのでログを残す（ラッチにより最短でも
+    // SIZE_FILTER_RETRY_MS に1回しか出ない＝ログが溢れることはない）。
+    if (failed) {
+      // 補完不能（dst 消失等）→ 従来どおりフィルタ無効（安全側）
+      sizeFilterRetryAfter = Date.now() + SIZE_FILTER_RETRY_MS;
+      console.error('[db] サイズ事前フィルタ無効化: size 未記録レコードのコピー先を確認できませんでした'
+        + `（sha=${String(failed[0]).slice(0, 12)}…, dst=${(failed[1] && failed[1].dstPath) || '(未記録)'}）。`
+        + `以後の重複チェックは全量ハッシュになります（${Math.round(SIZE_FILTER_RETRY_MS / 1000)}秒後に再試行）。`);
+      return null;
+    }
+    if (timedOut) {
+      sizeFilterRetryAfter = Date.now() + SIZE_FILTER_RETRY_MS;
+      console.error('[db] サイズ事前フィルタ無効化: レガシーレコードの補完が時間内に終わらず打ち切りました'
+        + `（未記録 ${missing.length} 件中 ${filled} 件を補完、予算 ${FILL_BUDGET_MS}ms）。`
+        + `補完できた分は記録済みで次回以降は続きから前進します（${Math.round(SIZE_FILTER_RETRY_MS / 1000)}秒後に再試行）。`);
+      return null;
+    }
+  }
+  // 走査中（await を挟む）に recordFile が走ると、その size は
+  // knownSizesCache がまだ null なので増分更新されず、この Set から漏れうる。
+  // 呼び出し元（取り込み / 重複チェック）は busy フラグで相互排他されており、
+  // 各処理の先頭で1回だけ呼ぶため実際には重ならない。万一漏れても
+  // 「重複になり得ないと誤判定 → 事前ハッシュを省略」までで、コピー後の
+  // db.hasHash(srcSha) 判定が二重登録を防ぐ。
+  knownSizesCache = sizes;
   return sizes;
 }
 
@@ -230,6 +423,9 @@ function getByHash(sha256) {
 function recordFile({ sha256, srcPath, dstPath, size, mtime, patientId, kind }) {
   init();
   const importedAt = Date.now();
+  // サイズ集合の増分更新（getKnownSizes のキャッシュを作り直さずに済ませる）。
+  // 未計算(null)なら何もしない＝次の初回走査で拾われる。
+  if (knownSizesCache && typeof size === 'number' && Number.isFinite(size)) knownSizesCache.add(size);
   if (db) {
     db.prepare(`
       INSERT OR IGNORE INTO files (sha256, src_path, dst_path, size, mtime, imported_at, patient_id, kind)
@@ -238,6 +434,10 @@ function recordFile({ sha256, srcPath, dstPath, size, mtime, patientId, kind }) 
   } else {
     const rec = { srcPath, dstPath, size, mtime, importedAt, patientId, kind };
     jsonFallback.files[sha256] = rec; // メモリ上は即時反映（hasHash/getByHash は正しく動く）
+    // stat 逆引きも同一セッション中に追随させる（未構築なら何もしない）。
+    // appendOp（例外を投げうる）より先に呼ぶ: 追記に失敗しても jsonFallback.files には
+    // 既に載っているので、索引だけ取り残されて hasHash と食い違う状態を作らない。
+    indexRecord(sha256, rec);
     appendOp({ t: 'file', sha256, rec }); // ディスクへの確定は flush() の fsync で
   }
 }
@@ -289,6 +489,7 @@ module.exports = {
   init,
   hasHash,
   getKnownSizes,
+  findByStat,
   getByHash,
   recordFile,
   flush,

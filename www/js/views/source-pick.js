@@ -10,6 +10,79 @@ window.Views.source = (function() {
     { key: 'endoscope',      label: '内視鏡',           hint: '画像/動画' },
   ];
 
+  // 重複チェック結果1件をファイル1件へマージする。
+  // 元データ削除の可否に効く選択状態を触るので、判定表を1か所に閉じてテストできるよう
+  // 純関数として切り出してある（render のクロージャに埋めない）。
+  //
+  //   res.error あり           … 判定に関わる状態（sha256 / sha256Verified / selected /
+  //                              autoDeselected / alreadyImported）を一切変更しない
+  //   alreadyImported=true     … 手動操作されていなければ自動解除
+  //   alreadyImported=false    … 手動操作されておらず、未決定(undefined) か
+  //                              前回自動解除(autoDeselected) のときだけ選択に戻す
+  //
+  // 「ユーザーの明示操作を自動判定で上書きしない」が原則。手動でチェックした既取込ファイルが
+  // 再チェックのたびに外れる／手動で外したファイルに autoDeselected が付いて後で勝手に
+  // 復活する、の両方向を塞ぐ。
+  //
+  // 手動かどうかの判定は f.manualSelection（プレビューでの明示操作でだけ立つ）で行い、
+  // autoDeselected は使わない。autoDeselected は「自動で外した」印であって
+  // 「手動で触った」印ではないため、これで代用すると
+  //   未取込 → 自動選択（autoDeselected=false）→ 再チェックで既取込に転じる
+  // の経路が手動扱いになり、プレビューの表示（既取込は自動除外）と食い違ったまま
+  // 取り込みへ再投入される（削除ON種別では元データ削除の対象に戻る）。
+  function mergeCheckResult(f, res) {
+    if (!f || !res) return;
+    if (res.error) {
+      // チェックできなかったファイル（stat 失敗・読み取りエラー等）。
+      // 「重複ではなかった」と解釈して選択状態を書き換えると、前回自動除外された
+      // ファイルが黙って再選択され、削除ON種別では元データ削除の対象に戻ってしまう。
+      // sha256 / sha256Verified も上書きしない（前回のチェックで検証済みの sha を、
+      // 転送エラー1回で失わないため）。
+      f.checkError = res.error;
+      return;
+    }
+    f.sha256 = res.sha256;
+    // 中身を実際に読んで計算した sha だけ verified。stat 逆引きの推定ヒットは false のまま
+    // 持ち回り、取り込み時に削除が絡む場合だけ main 側で実ハッシュに落としてもらう。
+    f.sha256Verified = !!res.hashed;
+    delete f.checkError;
+    f.alreadyImported = !!res.alreadyImported;
+    if (f.alreadyImported) {
+      // 自動で選択解除したものには印を付け、再チェックで「重複ではなかった」と
+      // 分かった場合に選択を復元できるようにする（推定ヒットが剥がれたケースで取りこぼさない）。
+      // ユーザーの明示操作（f.manualSelection）だけは自動判定で上書きしない
+      // （手動で選んだ既取込ファイルは選択のまま、手動で外したものは外れたまま）。
+      if (!f.manualSelection) {
+        f.selected = false;
+        f.autoDeselected = true;
+      }
+    } else if (!f.manualSelection) {
+      // 手動操作されていないファイルだけ自動で選択に戻す。
+      // 「未決定 か 前回自動解除」の条件は残す（自動判定の外で false になった状態を
+      // 勝手に true にしないため）。
+      if (f.selected === undefined || f.autoDeselected) {
+        f.selected = true;
+        f.autoDeselected = false;
+      }
+    }
+  }
+
+  // 差分インポート（重複チェック）を切ったソースの1ファイル分の状態リセット。
+  // 判定表（mergeCheckResult）と対になる副作用なので、同じく純関数として切り出してテストする。
+  //   - 自動で外したものだけ選択に戻す（手動で外したファイルは尊重して触らない）
+  //   - 前回チェックの判定（alreadyImported / checkError）は残さない
+  //   - manualSelection も消す: フィルタを切った時点で「自動判定 vs 手動」の区別自体が
+  //     無意味になる。残すと、フィルタを入れ直した次のチェックで、当時の一時的な手動操作が
+  //     いつまでも自動解除を抑止し続ける（削除ON種別では元データ削除の対象に残る）。
+  function resetDiffState(f) {
+    if (!f) return;
+    if (!f.manualSelection && f.autoDeselected) f.selected = true;
+    f.autoDeselected = false;
+    f.alreadyImported = false;
+    delete f.checkError;
+    delete f.manualSelection; // 参照している上の判定より後に消すこと
+  }
+
   async function render(state, mount) {
     if (!state.sources) state.sources = []; // [{ path, name, files, summary, type, useHashDiff }]
     const cfg = state.settings || await window.App.settings.get();
@@ -191,10 +264,22 @@ window.Views.source = (function() {
       // → preview で既定除外 → 不要なプレビュー操作を省く
       const filesToCheck = [];
       const ownerLookup = []; // [{srcIdx, fIdx}] 並び
+      // 前回チェックの残り香をプレビューへ持ち越さない（この実行の結果で上書きする）
+      state.lastCheckErrorCount = 0;
       state.sources.forEach((src, srcIdx) => {
-        if (src.useHashDiff === false) return;
+        if (src.useHashDiff === false) {
+          // 差分インポートを切ったソースは、前回チェックで付いた判定を残さない。
+          // 残すと「重複フィルタを切ったのに、前回自動除外されたファイルが
+          // 選択解除・非表示のまま」になり、ユーザーの指示と画面が食い違う。
+          src.files.forEach(resetDiffState);
+          return;
+        }
         src.files.forEach((f, fIdx) => {
-          filesToCheck.push({ path: f.path });
+          // main が使うのは path（対象の指定）と size（進捗バーの totalBytes）だけ。
+          // sha256 / sha256Verified / mtime は main 側で無視される（判定は main 自身の
+          // 台帳 checkLedger と自前の stat のみを根拠にする）ため送らない。
+          // 元データ削除の可否がレンダラの申告で変わることはない。
+          filesToCheck.push({ path: f.path, size: f.size });
           ownerLookup.push({ srcIdx, fIdx });
         });
       });
@@ -207,6 +292,7 @@ window.Views.source = (function() {
       // 進捗モーダル（キャンセル可能）
       const progressLabel = el('div', { style: { fontSize: '13px', marginBottom: '6px' } }, '重複ファイルをチェック中...');
       const progressDetail = el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)' } }, `0 / ${filesToCheck.length}`);
+      const progressName = el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, '');
       const progressBar = el('div', { class: 'progress-bar', style: { marginTop: '8px' } },
         el('div', { class: 'fill', style: { width: '0%' } }));
       const cancelCheckBtn = el('button', { class: 'ghost', style: { marginTop: '10px' } }, 'キャンセル');
@@ -223,6 +309,7 @@ window.Views.source = (function() {
       content.appendChild(el('h3', null, '前処理'));
       content.appendChild(progressLabel);
       content.appendChild(progressDetail);
+      content.appendChild(progressName);
       content.appendChild(progressBar);
       content.appendChild(cancelCheckBtn);
       okBtn.style.display = 'none';
@@ -232,9 +319,17 @@ window.Views.source = (function() {
       const off = window.App.ingest.onCheckProgress((data) => {
         if (data.type === 'progress' || data.type === 'done') {
           const n = data.done != null ? data.done : data.total;
-          const pct = data.total > 0 ? n / data.total * 100 : 0;
-          progressDetail.textContent = `${n} / ${data.total}`;
+          const hasBytes = typeof data.totalBytes === 'number' && data.totalBytes > 0;
+          // バー幅はバイト単位進捗が使えるならそちらを優先（大容量1本のハッシュ中でも動き続ける）。
+          // totalBytes が無い（旧イベント形式）場合は件数比で従来どおり動かす。
+          const pct = hasBytes
+            ? (data.bytes / data.totalBytes) * 100
+            : (data.total > 0 ? n / data.total * 100 : 0);
           progressBar.firstElementChild.style.width = pct.toFixed(1) + '%';
+
+          const bytesSuffix = hasBytes ? `（${formatBytes(data.bytes)} / ${formatBytes(data.totalBytes)}）` : '';
+          progressDetail.textContent = `${n} / ${data.total}${bytesSuffix}`;
+          progressName.textContent = data.name ? `処理中: ${data.name}` : '';
         }
       });
 
@@ -259,14 +354,18 @@ window.Views.source = (function() {
         // 結果を file にマージ
         r.results.forEach((res, i) => {
           if (!res) return;
+          // main は「送った要素数・順序どおり」に結果を返す契約（不正要素もエラー行で位置を保つ）。
+          // 万一ズレた場合は別ファイルへ判定を付けてしまうので、対応が取れない行は捨てる。
           const owner = ownerLookup[i];
+          if (!owner) return;
           const f = state.sources[owner.srcIdx].files[owner.fIdx];
-          f.sha256 = res.sha256;
-          f.alreadyImported = !!res.alreadyImported;
-          if (f.alreadyImported) f.selected = false;
-          else if (f.selected === undefined) f.selected = true;
+          mergeCheckResult(f, res);
         });
         state.lastDuplicateCount = r.duplicateCount || 0;
+        // チェックできなかった件数（stat 失敗・読み取りエラー等）。プレビューで注記を出す。
+        // これらのファイルは選択状態を一切変更していない＝「既取込は自動除外済み」という
+        // プレビューの説明が全件には当てはまらないので、件数だけでも見せる。
+        state.lastCheckErrorCount = r.results.filter((res) => res && res.error).length;
         state.goto('preview');
         return;
       }
@@ -379,5 +478,7 @@ window.Views.source = (function() {
     obs.observe(elList, { childList: true });
   }
 
-  return { render };
+  // _mergeCheckResult / _resetDiffState はテスト（scratchpad の ingest-smoke）から
+  // 判定表と副作用を直接叩くための公開。アプリ本体からは render 内でのみ使う。
+  return { render, _mergeCheckResult: mergeCheckResult, _resetDiffState: resetDiffState };
 })();
