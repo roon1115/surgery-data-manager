@@ -214,8 +214,10 @@ async function sendStudyImpl(args) {
         if (status === constants.Status.Success) sent++;
         else lastError = `C-STORE status=0x${status.toString(16)}`;
         if (--pending === 0) {
+          // 部分成功は失敗として返す（ok は全件成功のときだけ）。
+          // 呼出側が ok だけを見て「バッチ成功」と扱うと未送信分が失敗キューに残らず欠落するため。
           if (sent === datasets.length) settle({ ok: true, sent });
-          else settle({ ok: sent > 0, sent, error: lastError });
+          else settle({ ok: false, sent, failed: datasets.length - sent, error: lastError || `C-STORE 部分失敗 (${sent}/${datasets.length})` });
         }
       });
       client.addRequest(req);
