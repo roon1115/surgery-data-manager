@@ -101,18 +101,40 @@ function runClient(setup, timeoutMs = 30000) {
   const { Client } = dimse;
   return new Promise((resolve) => {
     let settled = false;
+    let closed = false;
+    let pendingAfterClose = null; // タイムアウト時: closed を待ってから返す値
+    let closeGrace = null;
     const settle = (value) => {
       if (settled) return;
       settled = true;
       clearTimeout(t);
+      if (closeGrace) clearTimeout(closeGrace);
       resolve(value);
     };
-    const t = setTimeout(() => settle({ ok: false, error: 'timeout' }), timeoutMs);
+    // タイムアウト: Promise を失敗で確定するだけでは association と未完了 C-STORE が生き残り、
+    // 呼出側が「失敗」として次バッチや再送を始めた後に旧クライアントが PACS へ遅延到達して
+    // 重複登録になる。association を明示 abort し、closed を待ってから確定する
+    // （closed が来ない場合も 5 秒で打ち切る）。結果は「送信状況不明」として返す。
+    const t = setTimeout(() => {
+      try { client.abort(); } catch (_) { /* 未接続など */ }
+      const value = {
+        ok: false,
+        indeterminate: true,
+        error: 'timeout（送信状況不明: 一部が遅延到達した可能性あり。再送時は重複に注意）',
+      };
+      if (closed) return settle(value);
+      pendingAfterClose = value;
+      closeGrace = setTimeout(() => settle(value), 5000);
+    }, timeoutMs);
 
     const client = new Client();
     client.on('networkError', (err) => settle({ ok: false, error: `network: ${err?.message || err}` }));
     client.on('associationRejected', () => settle({ ok: false, error: 'association rejected' }));
     client.on('associationReleased', () => { /* normal close */ });
+    client.on('closed', () => {
+      closed = true;
+      if (pendingAfterClose) settle(pendingAfterClose);
+    });
 
     try {
       setup(client, settle);
