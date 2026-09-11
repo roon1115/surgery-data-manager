@@ -126,15 +126,18 @@ window.Views.dicom = (function() {
         if (!studyUID && r.studyUID) studyUID = r.studyUID;
         if (!seriesUID && r.seriesUID) seriesUID = r.seriesUID;
 
-        if (r.ok) {
-          totalSent += r.sent || 0;
-          logLine(`✓ バッチ ${batchIdx + 1}: ${r.sent} 枚送信成功（累計 ${totalSent}/${total}）`, 'ok');
+        // 成功判定は main の ok に依存せず「送信数 == バッチ枚数」で行う。
+        // 部分成功（10枚中1枚だけ成功）を成功扱いにすると、残りが失敗キューに載らず
+        // 台帳上も回復不能な欠落になる。
+        const sentInBatch = Math.min(decodedBatch.length, Math.max(0, r.sent || 0));
+        const failed = decodedBatch.length - sentInBatch;
+        totalSent += sentInBatch;
+        if (r.ok && failed === 0) {
+          logLine(`✓ バッチ ${batchIdx + 1}: ${sentInBatch} 枚送信成功（累計 ${totalSent}/${total}）`, 'ok');
         } else {
-          const failed = decodedBatch.length - (r.sent || 0);
-          totalSent += r.sent || 0;
           totalSendFailed += failed;
-          if (!firstError) firstError = r.error;
-          logLine(`✗ バッチ ${batchIdx + 1}: ${failed} 枚失敗 — ${r.error || '不明'}`, 'err');
+          if (!firstError) firstError = r.error || `送信数不一致 (${sentInBatch}/${decodedBatch.length})`;
+          logLine(`✗ バッチ ${batchIdx + 1}: ${failed} 枚失敗（成功 ${sentInBatch}）— ${r.error || '不明'}`, 'err');
         }
 
         sendProcessed += decodedBatch.length;
