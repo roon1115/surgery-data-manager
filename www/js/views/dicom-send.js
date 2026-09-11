@@ -226,17 +226,27 @@ window.Views.dicom = (function() {
           elSubStatus.textContent = '';
           logLine(`完了: ${r.sent} 枚送信成功`, 'ok');
         } else {
-          elStatus.textContent = `送信完了（成功 ${r.sent} / 失敗 ${r.sendFailed} / 対象 ${r.total}）`;
-          elSubStatus.textContent = r.firstError ? `初回エラー: ${r.firstError}` : '';
+          // 失敗数はデコード失敗も含める（デコード失敗＝その画像は PACS に届いていない）
+          const totalFailed = (r.sendFailed || 0) + (r.decodeFailed || 0);
+          const reason = r.firstError || (r.decodeFailed > 0 ? `デコード失敗 ${r.decodeFailed} 枚` : '不明');
+          elStatus.textContent = `送信完了（成功 ${r.sent} / 失敗 ${totalFailed} / 対象 ${r.total}）`;
+          elSubStatus.textContent = `エラー: ${reason}`;
           if (r.sendFailed > 0) {
-            logLine(`失敗: ${r.sendFailed} 枚 — 初回エラー: ${r.firstError || '不明'}`, 'err');
-            await recordFailure(r.firstError);
+            logLine(`送信失敗: ${r.sendFailed} 枚 — 初回エラー: ${r.firstError || '不明'}`, 'err');
           }
+          if (r.decodeFailed > 0) {
+            logLine(`デコード失敗: ${r.decodeFailed} 枚（PACS には届いていません）`, 'err');
+          }
+          // 送信失敗・デコード失敗のどちらでも、未送信画像が残る限り必ず失敗キューに記録する
+          // （ログだけでは画面を離れた時点で追跡不能になり、永続的な欠落になる）
+          await recordFailure(reason);
         }
-        if (r.decodeFailed > 0) {
-          logLine(`デコード失敗: ${r.decodeFailed} 枚`, 'warn');
-        }
-        state.dicomResult = { ok: r.ok, sent: r.sent, error: r.firstError };
+        state.dicomResult = {
+          ok: r.ok,
+          sent: r.sent,
+          failed: (r.sendFailed || 0) + (r.decodeFailed || 0),
+          error: r.ok ? null : (r.firstError || (r.decodeFailed > 0 ? `デコード失敗 ${r.decodeFailed} 枚` : null)),
+        };
       } catch (e) {
         // sendStudy / decode 等が例外で抜けた場合も、結果と失敗キューを必ず残す
         // （部分送信の可能性があるため、再送時の重複警告は再送モーダル側で表示される）
