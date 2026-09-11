@@ -54,6 +54,7 @@ window.Views.dicom = (function() {
       sendBtn.disabled = busy;
       skipBtn.disabled = busy;
       backBtn.disabled = busy;
+      state.dicomSending = busy; // app.js の設定ボタン等、画面外からの遷移もこのフラグで抑止する
     };
 
     // ==== 送信コア（通常送信と再送キューの両方から使う）====
@@ -183,36 +184,56 @@ window.Views.dicom = (function() {
         desc: asciiStrip(state.patient.procedure),
       };
 
-      const r = await runSend(selected, patientArg, examArg);
-
-      if (r.ok) {
-        elStatus.textContent = `✓ 送信成功（${r.sent} / ${r.total} 枚）`;
-        elSubStatus.textContent = '';
-        logLine(`完了: ${r.sent} 枚送信成功`, 'ok');
-      } else {
-        elStatus.textContent = `送信完了（成功 ${r.sent} / 失敗 ${r.sendFailed} / 対象 ${r.total}）`;
-        elSubStatus.textContent = r.firstError ? `初回エラー: ${r.firstError}` : '';
-        if (r.sendFailed > 0) {
-          logLine(`失敗: ${r.sendFailed} 枚 — 初回エラー: ${r.firstError || '不明'}`, 'err');
+      // 失敗キューへの登録は例外時にも必ず行う（登録自体の失敗はログに残すだけ）
+      const recordFailure = async (error) => {
+        try {
           await window.App.dicom.queueFailure({
             target: state.targetFolder,
             patient: state.patient,
-            error: r.firstError || null,
+            error: error || null,
           });
           logLine('失敗を記録しました（次回この画面を開いたとき再送できます）', 'warn');
-          refreshPending();
+        } catch (qe) {
+          logLine('✗ 失敗記録の保存に失敗: ' + (qe?.message || qe), 'err');
         }
-      }
-      if (r.decodeFailed > 0) {
-        logLine(`デコード失敗: ${r.decodeFailed} 枚`, 'warn');
-      }
-      state.dicomResult = { ok: r.ok, sent: r.sent, error: r.firstError };
+        refreshPending();
+      };
 
-      setButtonsBusy(false);
-      sendBtn.disabled = true;
-      skipBtn.textContent = '完了 →';
-      skipBtn.classList.remove('ghost');
-      skipBtn.classList.add('primary');
+      try {
+        const r = await runSend(selected, patientArg, examArg);
+
+        if (r.ok) {
+          elStatus.textContent = `✓ 送信成功（${r.sent} / ${r.total} 枚）`;
+          elSubStatus.textContent = '';
+          logLine(`完了: ${r.sent} 枚送信成功`, 'ok');
+        } else {
+          elStatus.textContent = `送信完了（成功 ${r.sent} / 失敗 ${r.sendFailed} / 対象 ${r.total}）`;
+          elSubStatus.textContent = r.firstError ? `初回エラー: ${r.firstError}` : '';
+          if (r.sendFailed > 0) {
+            logLine(`失敗: ${r.sendFailed} 枚 — 初回エラー: ${r.firstError || '不明'}`, 'err');
+            await recordFailure(r.firstError);
+          }
+        }
+        if (r.decodeFailed > 0) {
+          logLine(`デコード失敗: ${r.decodeFailed} 枚`, 'warn');
+        }
+        state.dicomResult = { ok: r.ok, sent: r.sent, error: r.firstError };
+      } catch (e) {
+        // sendStudy / decode 等が例外で抜けた場合も、結果と失敗キューを必ず残す
+        // （部分送信の可能性があるため、再送時の重複警告は再送モーダル側で表示される）
+        const msg = e?.message || String(e);
+        elStatus.textContent = '✗ 送信中にエラーが発生しました';
+        elSubStatus.textContent = msg;
+        logLine('✗ 送信中に例外: ' + msg, 'err');
+        state.dicomResult = { ok: false, sent: 0, error: msg };
+        await recordFailure(msg);
+      } finally {
+        setButtonsBusy(false);
+        sendBtn.disabled = true;
+        skipBtn.textContent = '完了 →';
+        skipBtn.classList.remove('ghost');
+        skipBtn.classList.add('primary');
+      }
     };
 
     // ==== 過去の送信失敗（再送キュー）====
@@ -337,6 +358,20 @@ window.Views.dicom = (function() {
     );
     mount.replaceChildren(root);
     refreshPending();
+
+    // コピー完了直後の遷移なら、確認ボタンを待たずに送信を自動開始する。
+    // フラグは1回で消費し、「← 戻る」からの再表示や再送操作では自動実行しない。
+    if (state.autoDicomSend) {
+      state.autoDicomSend = false;
+      logLine('コピー完了に続けて自動送信を開始します', 'ok');
+      // render() を送信完了までブロックしない。
+      // 送信中は画面内ボタン無効化＋ state.dicomSending で app.js 側の遷移も抑止する。
+      // onclick 自身が try/catch/finally で完結するため、ここは想定外の保険のみ。
+      sendBtn.onclick().catch((e) => {
+        logLine('✗ 自動送信で想定外のエラー: ' + (e?.message || e), 'err');
+        setButtonsBusy(false);
+      });
+    }
   }
 
   return { render };

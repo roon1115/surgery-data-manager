@@ -131,6 +131,16 @@ window.Views.preview = (function() {
         // 全選択は「画面に表示されているファイル」のみを対象にする。
         // 非表示の既取込ファイルまで不可視のまま選択すると、削除ON種別で
         // ユーザーが気づかないうちに元データ削除の対象に入ってしまうため。
+        //
+        // 一括操作では manualSelection を立てない（＝以後の重複チェック結果による
+        // 自動選択/自動解除の保護対象にしない）。「全部チェックする」は
+        // 「このファイルを取り込みたい」という個別の意思表示ではなく、そこに
+        // 手動フラグを立てると、次のチェックで既取込と分かったファイルまで
+        // 自動解除されなくなる（削除ON種別では元データ削除の対象に残り続ける）。
+        // 個別のチェックボックス操作だけが manualSelection を立てる。
+        // autoDeselected（自動で外した印）も一括操作では触らない。落としてしまうと
+        // 「自動で外したから、非重複に転じたら自動で戻す」という追跡が切れる。
+        // 判定表は source-pick.js の mergeCheckResult を参照。
         const allOnBtn = el('button', { class: 'ghost', onclick: () => {
           src.files.forEach(f => {
             if (state.showAlreadyImported || !f.alreadyImported) f.selected = true;
@@ -138,7 +148,7 @@ window.Views.preview = (function() {
           renderSources(); renderSummary();
         }}, '全選択');
         const allOffBtn = el('button', { class: 'ghost', onclick: () => {
-          src.files.forEach(f => f.selected = false);
+          src.files.forEach(f => { f.selected = false; });
           renderSources(); renderSummary();
         }}, '全解除');
 
@@ -166,6 +176,10 @@ window.Views.preview = (function() {
             cb.checked = !!f.selected;
             cb.addEventListener('change', () => {
               f.selected = cb.checked;
+              // ユーザーが自分で触ったファイルは、次回チェックの自動選択/自動解除の
+              // 対象から外す（自動判定より後から示された意思を優先する）
+              f.manualSelection = true;
+              f.autoDeselected = false;
               // 全再描画するとリストのスクロール位置が先頭に戻り、下の方のファイルを
               // 連続でチェック操作できなくなるため、サマリと選択状況の行だけ更新する
               renderSummary();
@@ -303,7 +317,14 @@ window.Views.preview = (function() {
         ),
         el('div', { class: 'banner' },
           '実際にコピーされる前に確認してください。不要なファイルはチェックを外すと除外できます。'
-          + ' 事前にハッシュチェック済みのため、既取込ファイルは自動で除外表示されています。'),
+          + ' 事前に重複チェック済みのため、既取込ファイルは自動で除外表示されています。',
+          // チェックできなかったファイル（読み取りエラー等）がある場合の注記。
+          // これらは「重複ではなかった」とは判定できないため選択状態を一切変更していない。
+          // 黙っていると「既取込は自動で除外済み」という上の説明と実態が食い違ったままになる。
+          (state.lastCheckErrorCount > 0)
+            ? el('div', { style: { marginTop: '6px', color: 'var(--warn, #f59e0b)' } },
+                `⚠ ${state.lastCheckErrorCount} 件はチェックできませんでした（選択状態は変更していません）`)
+            : null),
         sourcesEl,
         el('div', { class: 'actions between' },
           backBtn,

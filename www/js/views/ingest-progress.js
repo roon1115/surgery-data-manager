@@ -337,6 +337,14 @@ window.Views.ingest = (function() {
     } else {
       logLine(`DICOM送信対象: ${result.dicomCandidates.length} 枚`, 'ok');
     }
+
+    // コピー完了後の DICOM 送信は確認なしで自動実行する（ユーザー要望 2026-09-12）。
+    // 中断時は送信対象が不完全な可能性があるため自動化せず、従来どおりボタン操作に委ねる。
+    if (hasDicom && !result.cancelled) {
+      state.autoDicomSend = true; // dicom 画面が1回だけ消費するフラグ
+      logLine('DICOM送信を自動開始します...', 'ok');
+      state.goto('dicom');
+    }
   }
 
   // 実行済み取り込みの結果だけを再表示する（DICOM 画面から戻ってきたとき等）。

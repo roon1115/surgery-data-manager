@@ -12,6 +12,17 @@ require('./screenshot-mode');
 const isMac = process.platform === 'darwin';
 let mainWindow = null;
 
+// 実行中の重複チェックを中断する。
+// 進捗イベントの受け手（レンダラ）が消える経路すべてから呼ぶ:
+//   did-navigate（リロード・画面遷移） / render-process-gone（レンダラのクラッシュ） /
+//   closed（ウィンドウを閉じた）。
+// 呼ばないと SD/NAS を読み続ける孤児チェックが残り、次のチェックも checkBusy で弾かれる。
+// 取り込み本体（ingest）は別扱い: 中断するとコピー途中のデータが宙に浮くため、
+// before-quit のダイアログでユーザーに確認してから止める。
+function cancelCheck() {
+  try { require('./ingest-handler').cancelCheckIfRunning(); } catch (_) {}
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1100,
@@ -50,9 +61,18 @@ function createWindow() {
   });
   win.webContents.on('render-process-gone', (_e, details) => {
     console.error('[renderer GONE]', details);
+    // 進捗の受け手が消えたので、実行中の重複チェックも止める（下記 did-navigate と同じ理由）
+    cancelCheck();
   });
   win.webContents.on('preload-error', (_e, preloadPath, error) => {
     console.error('[preload ERROR]', preloadPath, error);
+  });
+
+  // レンダラがリロード/遷移したら、実行中の重複チェックを中断する。
+  // 進捗の受け手が消えたまま SD を読み続ける孤児チェックになり、
+  // 遷移後の画面から再チェックしても checkBusy で弾かれるため。
+  win.webContents.on('did-navigate', () => {
+    cancelCheck();
   });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -71,7 +91,10 @@ function createWindow() {
   });
 
   mainWindow = win;
-  win.on('closed', () => { mainWindow = null; });
+  win.on('closed', () => {
+    mainWindow = null;
+    cancelCheck(); // ウィンドウを閉じた後も孤児チェックが SD を読み続けないように
+  });
 }
 
 ipcMain.handle('app:openExternal', async (_e, url) => {
