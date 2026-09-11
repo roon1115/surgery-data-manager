@@ -203,15 +203,27 @@ window.Views.dicom = (function() {
         desc: asciiStrip(state.patient.procedure),
       };
 
-      // 失敗キューへの登録は例外時にも必ず行う（登録自体の失敗はログに残すだけ）
+      // 失敗キューへの登録は例外時にも必ず行う（登録自体の失敗はログに残すだけ）。
+      // 登録するフォルダは「手術写真」の保存先に固定する。state.targetFolder は表示用の
+      // 代表（最初の種別）で、複数種別の取り込みでは麻酔記録などのフォルダを指し得る。
+      // それを登録すると再送時に無関係な画像を患者情報付きで PACS へ送ってしまう。
       const recordFailure = async (error) => {
+        const target = (state.targets && state.targets.surgicalPhoto) || null;
+        if (!target) {
+          logLine('✗ 失敗を記録できません: 手術写真の保存先フォルダが不明です（再送は手動で行ってください）', 'err');
+          return;
+        }
         try {
-          await window.App.dicom.queueFailure({
-            target: state.targetFolder,
+          const q = await window.App.dicom.queueFailure({
+            target,
             patient: state.patient,
             error: error || null,
           });
-          logLine('失敗を記録しました（次回この画面を開いたとき再送できます）', 'warn');
+          if (q && q.ok) {
+            logLine('失敗を記録しました（次回この画面を開いたとき再送できます）', 'warn');
+          } else {
+            logLine('✗ 失敗記録の保存に失敗: ' + (q?.error || '不明'), 'err');
+          }
         } catch (qe) {
           logLine('✗ 失敗記録の保存に失敗: ' + (qe?.message || qe), 'err');
         }
