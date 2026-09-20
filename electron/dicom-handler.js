@@ -96,6 +96,13 @@ function buildDataset(opts) {
   return new Dataset(elements, pickTransferSyntax(transferSyntax));
 }
 
+// runClient: dcmjs-dimse の Client を「無応答タイムアウト」付きで実行する。
+//
+// タイムアウトは総時間ではなく **無応答（進捗なし）が timeoutMs 続いたとき** に発火する。
+// v0.3.18 では総時間 60 秒の固定だったため、遅い経路（Wi-Fi・Tailscale 等）で 20 枚バッチ
+// （約 240MB）の転送が 60 秒を超えると、まだ順調に送れている最中に abort で打ち切り、
+// 残りの画像が PACS に届かなかった（v0.3.16 以前は abort しなかったので裏で届いていた）。
+// setup 側は C-STORE 応答のたびに ctl.touch() を呼び、ctl.progress.sent を更新する。
 function runClient(setup, timeoutMs = 30000) {
   if (!dimse) return Promise.resolve({ ok: false, error: 'dcmjs-dimse not installed' });
   const { Client } = dimse;
@@ -104,42 +111,71 @@ function runClient(setup, timeoutMs = 30000) {
     let closed = false;
     let pendingAfterClose = null; // タイムアウト時: closed を待ってから返す値
     let closeGrace = null;
+    let t = null;
+    const progress = { sent: 0, total: 0 };
     const settle = (value) => {
       if (settled) return;
       settled = true;
-      clearTimeout(t);
+      if (t) clearTimeout(t);
       if (closeGrace) clearTimeout(closeGrace);
       resolve(value);
     };
     // タイムアウト: Promise を失敗で確定するだけでは association と未完了 C-STORE が生き残り、
     // 呼出側が「失敗」として次バッチや再送を始めた後に旧クライアントが PACS へ遅延到達して
     // 重複登録になる。association を明示 abort し、closed を待ってから確定する
-    // （closed が来ない場合も 5 秒で打ち切る）。結果は「送信状況不明」として返す。
-    const t = setTimeout(() => {
+    // （closed が来ない場合も 5 秒で打ち切る）。結果は「送信状況不明」として返すが、
+    // 応答済み（=PACS が受理済み）の枚数は sent として正しく返す。
+    const onTimeout = () => {
+      if (settled) return;
       try { client.abort(); } catch (_) { /* 未接続など */ }
       const value = {
         ok: false,
         indeterminate: true,
-        error: 'timeout（送信状況不明: 一部が遅延到達した可能性あり。再送時は重複に注意）',
+        sent: progress.sent,
+        failed: Math.max(0, progress.total - progress.sent),
+        error: `timeout（${Math.round(timeoutMs / 1000)}秒間応答なし。受理済み ${progress.sent}/${progress.total} 枚。未受理分は再送時に重複しない）`,
       };
-      if (closed) return settle(value);
+      if (closed) return settleAndStop(value);
       pendingAfterClose = value;
-      closeGrace = setTimeout(() => settle(value), 5000);
-    }, timeoutMs);
+      closeGrace = setTimeout(() => settleAndStop(value), 5000);
+    };
+    const armTimer = () => {
+      if (t) clearTimeout(t);
+      t = setTimeout(onTimeout, timeoutMs);
+    };
+    const touch = () => { if (!settled) armTimer(); };
+    armTimer();
 
     const client = new Client();
-    client.on('networkError', (err) => settle({ ok: false, error: `network: ${err?.message || err}` }));
-    client.on('associationRejected', () => settle({ ok: false, error: 'association rejected' }));
+
+    // 応答イベントだけでは「1 枚の転送が timeoutMs を超える」低速経路（例: 12MB/枚を 1.5Mbps
+    // 以下で送る）を救えないため、ソケットの送受信バイト数（Client.getStatistics）を定期的に
+    // 見て、バイトが動いている限り進捗とみなす。これで「本当に止まった」ときだけ abort する。
+    let lastBytes = 0;
+    const activityPoll = setInterval(() => {
+      if (settled) { clearInterval(activityPoll); return; }
+      try {
+        const st = client.getStatistics && client.getStatistics();
+        const bytes = st ? (st.getBytesSent() + st.getBytesReceived()) : 0;
+        if (bytes !== lastBytes) { lastBytes = bytes; touch(); }
+      } catch (_) { /* 統計未対応でも応答ベースの再武装は残る */ }
+    }, 2000);
+    const origSettle = settle;
+    // settle 時にポーリングも止める（settle は const なので内側で差し替え）
+    const settleAndStop = (value) => { clearInterval(activityPoll); origSettle(value); };
+    client.on('networkError', (err) => settleAndStop({ ok: false, sent: progress.sent, error: `network: ${err?.message || err}` }));
+    client.on('associationRejected', () => settleAndStop({ ok: false, sent: 0, error: 'association rejected' }));
+    client.on('associationAccepted', () => touch()); // 接続確立も進捗
     client.on('associationReleased', () => { /* normal close */ });
     client.on('closed', () => {
       closed = true;
-      if (pendingAfterClose) settle(pendingAfterClose);
+      if (pendingAfterClose) settleAndStop(pendingAfterClose);
     });
 
     try {
-      setup(client, settle);
+      setup(client, settleAndStop, { touch, progress });
     } catch (e) {
-      settle({ ok: false, error: String(e?.message || e) });
+      settleAndStop({ ok: false, sent: progress.sent, error: String(e?.message || e) });
     }
   });
 }
@@ -223,11 +259,12 @@ async function sendStudyImpl(args) {
   }
 
   // バッチごとに新規 association を張る。Study/Series UID は呼出側で固定される。
-  const result = await runClient((client, settle) => {
+  const result = await runClient((client, settle, ctl) => {
     const { requests, constants } = dimse;
     let sent = 0;
     let lastError = null;
     let pending = datasets.length;
+    ctl.progress.total = datasets.length;
 
     datasets.forEach((ds) => {
       const req = new requests.CStoreRequest(ds);
@@ -235,6 +272,8 @@ async function sendStudyImpl(args) {
         const status = response.getStatus();
         if (status === constants.Status.Success) sent++;
         else lastError = `C-STORE status=0x${status.toString(16)}`;
+        ctl.progress.sent = sent;
+        ctl.touch(); // 応答が来ている限りタイムアウトしない（遅い経路でも打ち切らない）
         if (--pending === 0) {
           // 部分成功は失敗として返す（ok は全件成功のときだけ）。
           // 呼出側が ok だけを見て「バッチ成功」と扱うと未送信分が失敗キューに残らず欠落するため。
@@ -246,7 +285,7 @@ async function sendStudyImpl(args) {
     });
 
     client.send(host, port, callingAet, calledAet);
-  }, 60000); // 大量送信向けにタイムアウトを 60秒 に拡張
+  }, 60000); // 無応答 60 秒でタイムアウト（総時間ではない。応答が続く限り継続）
 
   // 呼出側がバッチ送信を続けられるよう、生成済 UID を必ず返す
   return { ...result, studyUID, seriesUID };

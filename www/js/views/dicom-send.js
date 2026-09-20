@@ -252,6 +252,18 @@ window.Views.dicom = (function() {
           // 送信失敗・デコード失敗のどちらでも、未送信画像が残る限り必ず失敗キューに記録する
           // （ログだけでは画面を離れた時点で追跡不能になり、永続的な欠落になる）
           await recordFailure(reason);
+          // 自動送信では利用者が画面を見ていないことが多いため、失敗はモーダルで必ず知らせる
+          U.modal({
+            title: 'DICOM送信に失敗した画像があります',
+            body: el('div', null,
+              el('p', null, `成功 ${r.sent} 枚 / 失敗 ${totalFailed} 枚（対象 ${r.total} 枚）`),
+              el('p', { style: { fontSize: '12px' } }, `理由: ${reason}`),
+              el('p', { style: { fontSize: '12px', color: 'var(--fg-mute)' } },
+                '失敗分は記録済みです。この画面の「再送」から送り直せます。ネットワークが遅い場合は時間をおいて再送してください。'),
+            ),
+            okText: 'OK',
+            cancelText: '',
+          });
         }
         state.dicomResult = {
           ok: r.ok,
