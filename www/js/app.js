@@ -37,6 +37,8 @@
       state.lastCheckErrorCount = 0;
       state.autoDicomSend = false;        // コピー完了→DICOM自動送信フラグも初期化
       state.dicomSending = false;
+      state.dicomStandalone = false;      // 開始画面バナーからの再送専用モードも解除
+      state.dicomRetry = null;            // 前セッションの失敗分再送情報を次の患者に持ち越さない
     },
   };
 
@@ -45,7 +47,9 @@
   async function render() {
     console.log('[app] render step=', state.step);
     const visibleStep = state.step === 'settings' ? 'patient' : state.step;
-    const doneSteps = stepOrder.slice(0, stepOrder.indexOf(state.step));
+    // 再送専用モード（開始画面バナー→DICOM 画面）は取り込みフローを通っていないので、
+    // 手前のステップを「完了」表示にしない
+    const doneSteps = state.dicomStandalone ? [] : stepOrder.slice(0, stepOrder.indexOf(state.step));
     U.setSteps(visibleStep, doneSteps);
 
     const view = window.Views[state.step];

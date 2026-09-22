@@ -55,6 +55,7 @@ contextBridge.exposeInMainWorld('App', {
     sendStudy: (args) => ipcRenderer.invoke('dicom:sendStudy', args),
     queueFailure: (args) => ipcRenderer.invoke('dicom:queueFailure', args),
     listPending: () => ipcRenderer.invoke('dicom:listPending'),
+    updatePending: (args) => ipcRenderer.invoke('dicom:updatePending', args),
     removePending: (id) => ipcRenderer.invoke('dicom:removePending', { id }),
   },
 
