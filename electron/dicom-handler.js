@@ -112,7 +112,7 @@ function runClient(setup, timeoutMs = 30000) {
     let pendingAfterClose = null; // タイムアウト時: closed を待ってから返す値
     let closeGrace = null;
     let t = null;
-    const progress = { sent: 0, total: 0 };
+    const progress = { sent: 0, total: 0, results: [] };
     const settle = (value) => {
       if (settled) return;
       settled = true;
@@ -133,6 +133,7 @@ function runClient(setup, timeoutMs = 30000) {
         indeterminate: true,
         sent: progress.sent,
         failed: Math.max(0, progress.total - progress.sent),
+        results: progress.results,
         error: `timeout（${Math.round(timeoutMs / 1000)}秒間応答なし。受理済み ${progress.sent}/${progress.total} 枚。未受理分は再送時に重複しない）`,
       };
       if (closed) return settleAndStop(value);
@@ -163,8 +164,8 @@ function runClient(setup, timeoutMs = 30000) {
     const origSettle = settle;
     // settle 時にポーリングも止める（settle は const なので内側で差し替え）
     const settleAndStop = (value) => { clearInterval(activityPoll); origSettle(value); };
-    client.on('networkError', (err) => settleAndStop({ ok: false, sent: progress.sent, error: `network: ${err?.message || err}` }));
-    client.on('associationRejected', () => settleAndStop({ ok: false, sent: 0, error: 'association rejected' }));
+    client.on('networkError', (err) => settleAndStop({ ok: false, sent: progress.sent, results: progress.results, error: `network: ${err?.message || err}` }));
+    client.on('associationRejected', () => settleAndStop({ ok: false, sent: 0, results: progress.results, error: 'association rejected' }));
     client.on('associationAccepted', () => touch()); // 接続確立も進捗
     client.on('associationReleased', () => { /* normal close */ });
     client.on('closed', () => {
@@ -241,14 +242,23 @@ async function sendStudyImpl(args) {
   const seriesUID = args.seriesUID || generateUID();
   const startInstance = Number.isInteger(args.startInstanceNumber) && args.startInstanceNumber > 0
     ? args.startInstanceNumber : 1;
+  const requestedSopUIDs = Array.isArray(args.sopUIDs) ? args.sopUIDs : [];
+  const sopUIDs = decodedImages.map((_, i) => requestedSopUIDs[i] || generateUID());
+  // InstanceNumber は呼出側がファイル単位で固定して渡す（再送でも同じ番号で送るため）。
+  // 指定が無い要素だけ従来どおり startInstanceNumber からの連番にする（後方互換）。
+  const requestedInstanceNumbers = Array.isArray(args.instanceNumbers) ? args.instanceNumbers : [];
+  const instanceNumbers = decodedImages.map((_, i) => {
+    const n = requestedInstanceNumbers[i];
+    return Number.isInteger(n) && n > 0 ? n : startInstance + i;
+  });
 
   let datasets;
   try {
     datasets = decodedImages.map((img, i) => buildDataset({
       patient, exam, studyUID, seriesUID,
-      sopUID: generateUID(),
+      sopUID: sopUIDs[i],
       modality, charset,
-      instanceNumber: startInstance + i,
+      instanceNumber: instanceNumbers[i],
       width: img.width,
       height: img.height,
       rgb: new Uint8Array(img.rgb),
@@ -264,21 +274,25 @@ async function sendStudyImpl(args) {
     let sent = 0;
     let lastError = null;
     let pending = datasets.length;
+    const results = new Array(datasets.length);
+    ctl.progress.results = results;
     ctl.progress.total = datasets.length;
 
-    datasets.forEach((ds) => {
+    datasets.forEach((ds, index) => {
       const req = new requests.CStoreRequest(ds);
       req.on('response', (response) => {
         const status = response.getStatus();
-        if (status === constants.Status.Success) sent++;
+        const ok = status === constants.Status.Success;
+        results[index] = { index, ok, status, sopUID: sopUIDs[index], instanceNumber: instanceNumbers[index] };
+        if (ok) sent++;
         else lastError = `C-STORE status=0x${status.toString(16)}`;
         ctl.progress.sent = sent;
         ctl.touch(); // 応答が来ている限りタイムアウトしない（遅い経路でも打ち切らない）
         if (--pending === 0) {
           // 部分成功は失敗として返す（ok は全件成功のときだけ）。
           // 呼出側が ok だけを見て「バッチ成功」と扱うと未送信分が失敗キューに残らず欠落するため。
-          if (sent === datasets.length) settle({ ok: true, sent });
-          else settle({ ok: false, sent, failed: datasets.length - sent, error: lastError || `C-STORE 部分失敗 (${sent}/${datasets.length})` });
+          if (sent === datasets.length) settle({ ok: true, sent, failed: 0, results });
+          else settle({ ok: false, sent, failed: datasets.length - sent, results, error: lastError || `C-STORE 部分失敗 (${sent}/${datasets.length})` });
         }
       });
       client.addRequest(req);
@@ -287,32 +301,100 @@ async function sendStudyImpl(args) {
     client.send(host, port, callingAet, calledAet);
   }, 60000); // 無応答 60 秒でタイムアウト（総時間ではない。応答が続く限り継続）
 
-  // 呼出側がバッチ送信を続けられるよう、生成済 UID を必ず返す
-  return { ...result, studyUID, seriesUID };
+  // networkError/timeout/abort では応答イベントが来ない画像がある。応答済みの結果を保ち、
+  // 未応答だけを失敗にすることで、保存済み画像を再送対象へ混ぜない。
+  const responseResults = Array.isArray(result.results) ? result.results : [];
+  const byIndex = new Map(responseResults.filter(Boolean).map((it) => [it.index, it]));
+  const results = datasets.map((_, index) => byIndex.get(index) || ({
+    index, ok: false, status: null, sopUID: sopUIDs[index], instanceNumber: instanceNumbers[index],
+    reason: result.error || 'no-response',
+  }));
+  const sent = results.filter((it) => it.ok).length;
+  return { ...result, ok: sent === datasets.length, sent, failed: datasets.length - sent, results, studyUID, seriesUID };
 }
+
+const hasFileLevelInfo = (rec) => Array.isArray(rec && rec.files) && rec.files.length > 0;
 
 ipcMain.handle('dicom:queueFailure', async (_e, args = {}) => {
   if (!args.target || !args.patient) return { ok: false, error: 'invalid args' };
-  // 同じフォルダの失敗記録が既にあれば、新規追加せず attempts を増やす
-  // （送信リトライのたびにキューが際限なく増えるのを防ぐ）
-  const existing = db.listPendingDicom().find(
-    (it) => (it.dstPath || it.dst_path) === args.target
+  // 同じフォルダの失敗記録への相乗り（dedup）は、記録の意味が完全に一致するときだけ行う。
+  // フォルダが同じでも Study が違えば別の送信であり、混ぜると未送信の範囲が壊れる：
+  //   - 旧レコード（files 無し）は「このフォルダ全体が未送信かもしれない」という意味。
+  //     そこへファイル単位の失敗を merge すると、フォルダ全体という範囲が消えて
+  //     未送信が黙って落ちる。
+  //   - 別 Study の失敗を混ぜると、再送時に他 Study の SOP UID を持つ画像まで
+  //     同じ Study へ送られ、PACS に重複登録され得る。
+  // 一致しないものは既存レコードに触らず、新しいレコードを別に作る（キューに複数行
+  // 並ぶが、レンダラ側の一覧・再送・削除はいずれも id 単位なので同じ dstPath でも扱える）。
+  const sameFolder = db.listPendingDicom().filter(
+    (it) => it && it.id != null && (it.dstPath || it.dst_path) === args.target
   );
-  if (existing && existing.id != null) {
-    db.updatePendingDicom(existing.id, {
-      attempts: (existing.attempts || 0) + 1,
-      lastError: args.error || existing.lastError || existing.last_error || null,
+  const incomingFiles = (Array.isArray(args.files) ? args.files : []).filter((f) => f && f.path);
+
+  // 既存レコードの更新条件: 既存も今回もファイル単位、かつ同じ Study。
+  // studyUID が取れなかった（IPC 例外等で main の応答が無い）ときは同一性を判断できないので
+  // 相乗りしない。判断できないまま混ぜる方が、キューが1行増えるより危険。
+  // Series も一致を要求する。同じ Study 内で別 Series の失敗を混ぜると、旧 Series の files が
+  // 新しい seriesUID で再送され、受理済み SOP UID と属性が食い違う（PACS 上で重複・競合）。
+  const mergeable = incomingFiles.length > 0 && args.studyUID && args.seriesUID
+    ? sameFolder.find((it) => hasFileLevelInfo(it) && it.studyUID === args.studyUID && it.seriesUID === args.seriesUID)
+    : null;
+  if (mergeable) {
+    const merged = new Map();
+    for (const file of mergeable.files) if (file?.path) merged.set(file.path, file);
+    for (const file of incomingFiles) merged.set(file.path, file);
+    db.updatePendingDicom(mergeable.id, {
+      attempts: (mergeable.attempts || 0) + 1,
+      lastError: args.error || mergeable.lastError || mergeable.last_error || null,
+      files: Array.from(merged.values()),
+      // studyUID / seriesUID は一致が相乗りの条件なので上書きしない（同一性の基準を書き換えない）
+      nextInstanceNumber: args.nextInstanceNumber,
+      sentCount: args.sentCount,
+      totalCount: args.totalCount,
     });
-    return { ok: true, deduped: true };
+    return { ok: true, deduped: true, id: mergeable.id };
   }
-  db.queueDicom({
+
+  // 旧レコード（フォルダ単位）どうしは従来どおり attempts を増やすだけ。
+  // ファイル単位の情報を持たないので studyUID 等は触らない（触ると意味が壊れる）。
+  if (incomingFiles.length === 0) {
+    const folderRec = sameFolder.find((it) => !hasFileLevelInfo(it));
+    if (folderRec) {
+      db.updatePendingDicom(folderRec.id, {
+        attempts: (folderRec.attempts || 0) + 1,
+        lastError: args.error || folderRec.lastError || folderRec.last_error || null,
+      });
+      return { ok: true, deduped: true, id: folderRec.id };
+    }
+  }
+
+  const id = db.queueDicom({
     dstPath: args.target,
     patientId: args.patient.id || '',
     patientName: args.patient.nameRomaji || args.patient.name || '',
     procedure: args.patient.procedure || '',
     studyDate: args.patient.date || '',
+    // path を持たない要素は再送に使えないので落とす。全部落ちたら files 無し
+    // （＝フォルダ全体が未送信かもしれない）の記録として残す方が安全側。
+    files: incomingFiles.length > 0 ? incomingFiles : undefined,
+    studyUID: args.studyUID,
+    seriesUID: args.seriesUID,
+    nextInstanceNumber: args.nextInstanceNumber,
+    sentCount: args.sentCount,
+    totalCount: args.totalCount,
+    lastError: args.error || null,
   });
-  return { ok: true };
+  return { ok: true, id };
+});
+
+ipcMain.handle('dicom:updatePending', async (_e, args = {}) => {
+  if (!Number.isInteger(args.id)) return { ok: false, error: 'invalid id' };
+  const allowed = {};
+  for (const key of ['files', 'studyUID', 'seriesUID', 'nextInstanceNumber', 'sentCount', 'totalCount', 'attempts', 'lastError']) {
+    if (args[key] !== undefined) allowed[key] = args[key];
+  }
+  db.updatePendingDicom(args.id, allowed);
+  return { ok: true, id: args.id };
 });
 
 ipcMain.handle('dicom:listPending', async () => {
@@ -327,4 +409,4 @@ ipcMain.handle('dicom:removePending', async (_e, args = {}) => {
   return { ok: true };
 });
 
-module.exports = { generateUID };
+module.exports = { generateUID, sendStudyImpl, runClient };

@@ -25,7 +25,7 @@ let nextDicomId = 1;
 // ジャーナル1行 = 1操作。
 //   { t:'file', sha256, rec }                          … recordFile
 //   { t:'dcm+', item }                                 … queueDicom (item.id 採番済み)
-//   { t:'dcm~', id, attempts, lastError, remove }      … updatePendingDicom
+//   { t:'dcm~', id, ...fields, remove }                … updatePendingDicom
 function applyOp(op) {
   if (!op || typeof op !== 'object') return;
   if (op.t === 'file' && typeof op.sha256 === 'string' && op.rec) {
@@ -41,6 +41,11 @@ function applyOp(op) {
     } else {
       if (op.attempts !== undefined) jsonFallback.pending_dicom[idx].attempts = op.attempts;
       if (op.lastError !== undefined) jsonFallback.pending_dicom[idx].lastError = op.lastError;
+      // フィールドが無い旧ジャーナルは従来どおり何も変更しない。既知の項目だけを写すことで、
+      // 将来版の未知フィールドを誤って永続化することも避ける。
+      for (const key of ['files', 'studyUID', 'seriesUID', 'nextInstanceNumber', 'sentCount', 'totalCount']) {
+        if (op[key] !== undefined) jsonFallback.pending_dicom[idx][key] = op[key];
+      }
     }
   }
 }
@@ -442,7 +447,11 @@ function recordFile({ sha256, srcPath, dstPath, size, mtime, patientId, kind }) 
   }
 }
 
-function queueDicom({ dstPath, patientId, patientName, procedure, studyDate }) {
+// ファイル単位の再送情報（files / studyUID / seriesUID / nextInstanceNumber / sentCount / totalCount）は
+// JSON 経路にだけ保存する。SQLite 経路は Database = null 固定（本ファイル冒頭）で到達不能なので
+// スキーマを拡張していない。SQLite を有効化する場合はこれらの列を追加しないと、再起動後の再送が
+// 旧レコード扱い（フォルダ全体・新規 Study）に退行して PACS に重複登録される。
+function queueDicom({ dstPath, patientId, patientName, procedure, studyDate, files, studyUID, seriesUID, nextInstanceNumber, sentCount, totalCount, lastError }) {
   init();
   if (db) {
     db.prepare(`
@@ -453,10 +462,12 @@ function queueDicom({ dstPath, patientId, patientName, procedure, studyDate }) {
     const item = {
       id: nextDicomId++,
       dstPath, patientId, patientName, procedure, studyDate, queuedAt: Date.now(), attempts: 0,
+      files, studyUID, seriesUID, nextInstanceNumber, sentCount, totalCount, lastError,
     };
     jsonFallback.pending_dicom.push(item);
     appendOp({ t: 'dcm+', item });
     flush(); // キュー投入は低頻度なので即確定
+    return item.id;
   }
 }
 
@@ -468,7 +479,7 @@ function listPendingDicom() {
   return jsonFallback.pending_dicom.map((it) => ({ ...it }));
 }
 
-function updatePendingDicom(id, { attempts, lastError, remove }) {
+function updatePendingDicom(id, { attempts, lastError, remove, files, studyUID, seriesUID, nextInstanceNumber, sentCount, totalCount }) {
   init();
   if (db) {
     if (remove) {
@@ -479,7 +490,8 @@ function updatePendingDicom(id, { attempts, lastError, remove }) {
     }
     return;
   }
-  const op = { t: 'dcm~', id, attempts, lastError, remove: !!remove };
+  const op = { t: 'dcm~', id, attempts, lastError, remove: !!remove,
+    files, studyUID, seriesUID, nextInstanceNumber, sentCount, totalCount };
   applyOp(op);
   appendOp(op);
   flush(); // 再送成功でキューから消す操作は低頻度なので即確定

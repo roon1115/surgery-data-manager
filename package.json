@@ -1,6 +1,6 @@
 {
   "name": "surgery-data-manager",
-  "version": "0.3.19",
+  "version": "0.3.20",
   "description": "手術データ管理アプリ — 記録媒体からの差分インポートとDICOM送信",
   "main": "electron/main.js",
   "private": true,
@@ -14,7 +14,9 @@
     "build:mac:x64": "electron-builder --mac --x64",
     "electron:dist": "electron-builder --mac --publish never",
     "electron:publish": "electron-builder --mac --publish always",
-    "rebuild": "electron-rebuild"
+    "rebuild": "electron-rebuild",
+    "dev:fake-scp": "node scripts/dev/fake-scp.js",
+    "test": "node --test test/*.test.js"
   },
   "devDependencies": {
     "@electron/notarize": "^2.5.0",

@@ -20,6 +20,9 @@ window.Views.patient = (function() {
     if (!state.patient) {
       state.patient = { id: '', name: '', nameRomaji: '', procedure: '', date: todayIso() };
     }
+    // 開始画面に戻った時点で再送専用モードは終了。フラグが残ったままだと
+    // 次の取り込みで DICOM 送信画面が再送専用表示になり通常送信ができない。
+    state.dicomStandalone = false;
     const p = state.patient;
     const cfg = state.settings || await window.App.settings.get();
     state.settings = cfg;
@@ -83,6 +86,29 @@ window.Views.patient = (function() {
       recallBadge.style.display = 'block';
       updatePreview();
     }
+
+    // 未送信 DICOM の案内バナー。
+    // 以前は取り込みフローを5画面進まないと失敗キューに触れず、送信し損ねた写真が
+    // 気づかれないまま放置されていた。開始画面から直接再送画面へ行けるようにする。
+    const pendingBanner = el('div');
+    async function renderPendingBanner() {
+      const r = await window.App.dicom.listPending().catch(() => null);
+      const items = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+      pendingBanner.innerHTML = '';
+      if (items.length === 0) return;
+      pendingBanner.appendChild(el('div', { class: 'banner warn' },
+        el('div', null, `未送信の DICOM 写真が ${items.length} 件あります。`),
+        el('button', {
+          class: 'ghost',
+          style: { marginTop: '6px' },
+          onclick: () => {
+            state.dicomStandalone = true; // 取り込みフローを通らず再送画面だけを開く
+            state.goto('dicom');
+          },
+        }, '再送画面を開く'),
+      ));
+    }
+    renderPendingBanner();
 
     const recentListEl = el('div');
     async function renderRecent() {
@@ -165,6 +191,7 @@ window.Views.patient = (function() {
     const formCard = el('div', { class: 'card' },
       el('h2', null, '患者情報'),
       cfgWarn,
+      pendingBanner,
       recallBadge,
       el('div', { class: 'row' },
         el('label', { class: 'field' },

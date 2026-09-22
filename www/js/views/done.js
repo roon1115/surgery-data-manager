@@ -43,7 +43,11 @@ window.Views.done = (function() {
     const dicomLine = dicom
       ? (dicom.ok
           ? el('div', { class: 'banner ok' }, `✓ DICOM送信成功: ${dicom.sent} 枚`)
-          : el('div', { class: 'banner err' }, `✗ DICOM送信失敗: ${dicom.error || ''}`))
+          : el('div', { class: 'banner err' },
+              el('div', null, `✗ DICOM送信失敗: ${dicom.error || ''}`),
+              // 失敗分はファイル単位で記録済みなので、送信画面に戻れば同じ Study に未送信分だけを再送できる
+              el('button', { class: 'ghost', style: { marginTop: '6px', fontSize: '12px' }, onclick: () => state.goto('dicom') },
+                'DICOM 送信画面に戻って再送')))
       : el('div', { class: 'banner' }, 'DICOM送信はスキップされました。');
 
     // 種別ごとに「フォルダを開く」ボタン
