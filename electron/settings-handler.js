@@ -43,6 +43,8 @@ const store = new Store({
     // コピー後にコピー先を読み戻してハッシュ照合するか（既定 true）。
     // false にしても「コピー後削除」がONの種別では必ず照合する（安全側で固定）。
     verifyAfterCopy: true,
+    // SMB 保存先では同時書き込みを抑える。必要な環境だけ 1〜3 の範囲で調整する。
+    ingestConcurrency: 2,
   },
 });
 
@@ -88,6 +90,7 @@ function getAll() {
     excludedVolumes,
     deleteAfterCopy,
     verifyAfterCopy: store.get('verifyAfterCopy') !== false,
+    ingestConcurrency: [1, 2, 3].includes(store.get('ingestConcurrency')) ? store.get('ingestConcurrency') : 2,
   };
 }
 
@@ -117,6 +120,9 @@ ipcMain.handle('settings:save', async (_e, partial = {}) => {
   }
   if (typeof partial.verifyAfterCopy === 'boolean') {
     store.set('verifyAfterCopy', partial.verifyAfterCopy);
+  }
+  if (Number.isInteger(partial.ingestConcurrency) && partial.ingestConcurrency >= 1 && partial.ingestConcurrency <= 3) {
+    store.set('ingestConcurrency', partial.ingestConcurrency);
   }
   return getAll();
 });

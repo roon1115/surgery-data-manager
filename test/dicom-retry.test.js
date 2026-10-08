@@ -13,7 +13,104 @@ const {
   nextInstanceNumberAfter,
   assignInstanceNumbers,
   generateSopUID,
+  decodeWithFallback,
+  createDecodeTimeoutBreaker,
 } = require('../www/js/dicom-retry.js');
+
+const SHA = 'a'.repeat(64);
+
+function makeDeps(overrides = {}) {
+  const calls = [];
+  const logs = [];
+  return {
+    calls, logs,
+    deps: {
+      readVerifiedSource: async (a) => { calls.push(['verify', a]); return { ok: true, bytes: new Uint8Array([1, 2, 3]) }; },
+      decodeBytes: async (bytes, name) => { calls.push(['bytes', name, bytes.length]); return { width: 1, from: 'sd' }; },
+      decodeFile: async (p) => { calls.push(['file', p]); return { width: 2, from: 'nas' }; },
+      log: (t) => logs.push(t),
+      ...overrides,
+    },
+  };
+}
+
+test('decodeWithFallback: 照合一致なら SD の bytes をデコードし、識別子は NAS パスのまま', async () => {
+  const file = { path: '/nas/photo.jpg', srcPath: '/sd/photo.jpg', srcSha: SHA, name: 'photo.jpg' };
+  const { deps, calls, logs } = makeDeps();
+  const result = await decodeWithFallback(file, deps);
+  assert.equal(result.from, 'sd');
+  assert.deepEqual(calls, [['verify', { path: '/sd/photo.jpg', sha256: SHA }], ['bytes', '/sd/photo.jpg', 3]]);
+  assert.equal(logs.length, 0);
+  assert.equal(file.path, '/nas/photo.jpg');
+  assert.equal(collectFailures([file], [0], [])[0].path, '/nas/photo.jpg');
+  assert.equal(Object.hasOwn(collectFailures([file], [0], [])[0], 'srcPath'), false);
+});
+
+test('decodeWithFallback: srcSha が無ければ SD は読まず NAS（照合せずに SD を信用しない）', async () => {
+  const { deps, calls } = makeDeps();
+  const r = await decodeWithFallback({ path: '/nas/p.jpg', srcPath: '/sd/p.jpg', name: 'p.jpg' }, deps);
+  assert.equal(r.from, 'nas');
+  assert.deepEqual(calls, [['file', '/nas/p.jpg']]);
+  calls.length = 0;
+  await decodeWithFallback({ path: '/nas/p.jpg' }, deps);
+  assert.deepEqual(calls, [['file', '/nas/p.jpg']]);
+});
+
+test('decodeWithFallback: 照合失敗（不一致・取り外し・IPC例外）は NAS から読み、理由をログに残す', async () => {
+  const file = { path: '/nas/p.jpg', srcPath: '/sd/p.jpg', srcSha: SHA, name: 'p.jpg' };
+  for (const [verify, reason] of [
+    [async () => ({ ok: false, reason: 'sha-mismatch' }), 'sha-mismatch'],
+    [async () => ({ ok: false, reason: 'read-failed' }), 'read-failed'],
+    [async () => { throw new Error('ipc'); }, 'ipc-error'],
+  ]) {
+    const { deps, calls, logs } = makeDeps({ readVerifiedSource: verify });
+    const r = await decodeWithFallback(file, deps);
+    assert.equal(r.from, 'nas');
+    assert.deepEqual(calls, [['file', '/nas/p.jpg']]); // bytes は一切デコードしない
+    assert.equal(logs.length, 1);
+    // sha-mismatch だけ「一致しない」、それ以外は「読めない」＋理由（誤解させない書き分け）
+    if (reason === 'sha-mismatch') {
+      assert.match(logs[0], /SD の写真がコピー時と一致しないため NAS から読みます/);
+    } else {
+      assert.match(logs[0], /SD の写真を読めないため NAS から読みます/);
+      assert.match(logs[0], new RegExp(reason));
+    }
+  }
+});
+
+test('decodeWithFallback: SD の bytes がデコード不可でも NAS を一度試し、両方失敗なら失敗を返す', async () => {
+  const file = { path: '/nas/p.jpg', srcPath: '/sd/p.jpg', srcSha: SHA, name: 'p.jpg' };
+  const a = makeDeps({ decodeBytes: async () => { throw new Error('bad'); } });
+  assert.equal((await decodeWithFallback(file, a.deps)).from, 'nas');
+  const b = makeDeps({
+    decodeBytes: async () => { throw new Error('bad'); },
+    decodeFile: async () => { throw new Error('nas failed'); },
+  });
+  await assert.rejects(decodeWithFallback(file, b.deps), /nas failed/);
+});
+
+test('decodeWithFallback: canvas で読めない拡張子は SD を読み込まない', async () => {
+  const { deps, calls } = makeDeps({ canDecode: () => false });
+  await decodeWithFallback({ path: '/nas/p.heic', srcPath: '/sd/p.heic', srcSha: SHA, name: 'p.heic' }, deps);
+  assert.deepEqual(calls, [['file', '/nas/p.heic']]);
+});
+
+test('createDecodeTimeoutBreaker: 時間切れが 3 回連続で作動し、途中の成功・別の失敗で数え直す', () => {
+  const timeout = () => Object.assign(new Error('t'), { decodeTimeout: true });
+  const b = createDecodeTimeoutBreaker(3);
+  b.recordFailure(timeout()); b.recordFailure(timeout());
+  assert.equal(b.isTripped(), false);
+  b.recordSuccess();
+  b.recordFailure(timeout()); b.recordFailure(timeout());
+  assert.equal(b.isTripped(), false);
+  b.recordFailure(new Error('other'));
+  b.recordFailure(timeout()); b.recordFailure(timeout());
+  assert.equal(b.isTripped(), false);
+  b.recordFailure(timeout());
+  assert.equal(b.isTripped(), true);
+  b.recordSuccess(); // 作動後は元に戻らない（残りは失敗キューへ回す）
+  assert.equal(b.isTripped(), true);
+});
 
 test('collectFailures: decode失敗・ステータス失敗・無応答をfiles順に集める', () => {
   const files = [
@@ -317,4 +414,36 @@ test('generateSopUID: "2.25."始まり・数字のみ・64文字以内・呼ぶ�
 
 test('generateSopUID: getRandomValuesが無ければnullを返す', () => {
   assert.equal(generateSopUID({}), null);
+});
+
+test('decodeWithFallback: SD の時間切れが 2 回続いたら、その送信の残りは SD を読まない', async () => {
+  const Retry = require('../www/js/dicom-retry.js');
+  let sdCalls = 0; const logs = [];
+  const deps = {
+    sourceState: { timeouts: 0, disabled: false },
+    readVerifiedSource: async () => { sdCalls++; return { ok: false, reason: 'timeout' }; },
+    decodeBytes: async () => { throw new Error('unused'); },
+    decodeFile: async (p) => ({ from: p }),
+    log: (t) => logs.push(t),
+  };
+  for (let i = 1; i <= 4; i++) {
+    const r = await Retry.decodeWithFallback({ path: `/nas/${i}.jpg`, name: `${i}.jpg`, srcPath: `/sd/${i}.jpg`, srcSha: 'a'.repeat(64) }, deps);
+    assert.equal(r.from, `/nas/${i}.jpg`); // 識別子と読み先は常に NAS の path
+  }
+  assert.equal(sdCalls, 2);
+  assert.equal(deps.sourceState.disabled, true);
+  assert.ok(logs.some((l) => /SD が応答しないため、残りの写真は NAS から読みます/.test(l)));
+});
+
+test('decodeWithFallback: 時間切れ以外の失敗や成功で連続回数は戻る', async () => {
+  const Retry = require('../www/js/dicom-retry.js');
+  const seq = ['timeout', 'sha-mismatch', 'timeout'];
+  let i = 0;
+  const deps = {
+    sourceState: { timeouts: 0, disabled: false },
+    readVerifiedSource: async () => ({ ok: false, reason: seq[i++] }),
+    decodeBytes: async () => ({}), decodeFile: async () => ({}), log: () => {},
+  };
+  for (let k = 0; k < 3; k++) await Retry.decodeWithFallback({ path: '/nas/x.jpg', srcPath: '/sd/x.jpg', srcSha: 'b'.repeat(64) }, deps);
+  assert.equal(deps.sourceState.disabled, false);
 });

@@ -55,6 +55,8 @@ contextBridge.exposeInMainWorld('App', {
     openLog: () => ipcRenderer.invoke('dicom:openLog'),
     logLine: (text, level) => ipcRenderer.invoke('dicom:logLine', { text, level }),
     sendStudy: (args) => ipcRenderer.invoke('dicom:sendStudy', args),
+    // SD の現物をコピー時の SHA-256 と照合して返す（一致時のみ bytes）。{ path, sha256 }
+    readVerifiedSource: (args) => ipcRenderer.invoke('dicom:readVerifiedSource', args),
     queueFailure: (args) => ipcRenderer.invoke('dicom:queueFailure', args),
     listPending: () => ipcRenderer.invoke('dicom:listPending'),
     updatePending: (args) => ipcRenderer.invoke('dicom:updatePending', args),

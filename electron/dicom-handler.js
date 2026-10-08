@@ -1,5 +1,7 @@
 const { ipcMain } = require('electron');
 const crypto = require('crypto');
+const fsp = require('fs/promises');
+const nodePath = require('path');
 const settings = require('./settings-handler');
 const db = require('./db');
 const dicomLog = require('./dicom-log');
@@ -643,6 +645,68 @@ ipcMain.handle('dicom:removePending', async (_e, args = {}) => {
   return { ok: true };
 });
 
+// ==== 送信直前の SD 現物照合 ====
+// コピー時の SHA-256（srcSha）と、いま SD にある同じパスのファイルの SHA-256 が一致した
+// ときだけ中身を返す。SD を差し替えた／番号が振り直された／書き換わった場合は ok:false を
+// 返し、レンダラは NAS の保存済みファイルから読む。パスだけを信用して file:// で読むと、
+// 別症例の写真が「この患者の画像」として PACS へ送られてしまうため。
+//   - 返すバイト列と照合したバイト列は同一のバッファ（照合後に読み直さない＝すり替えの隙を作らない）
+//   - sha256 が一致しなければ中身は一切返さないので、任意ファイルの読み出しには使えない
+//   - 大きさ上限を超えるものは読まない／30 秒で打ち切る（取り外し・SMB 無応答で固まらない）
+// 契約: args = { path: 絶対パス, sha256: 64桁hex }
+//       成功 { ok:true, bytes: Uint8Array }
+//       失敗 { ok:false, reason: 'invalid-args'|'not-file'|'too-large'|'timeout'|'read-failed'|'sha-mismatch' }
+const VERIFIED_SOURCE_MAX_BYTES = 100 * 1024 * 1024;
+const VERIFIED_SOURCE_TIMEOUT_MS = 30 * 1000;
+
+async function readVerifiedSourceImpl(args = {}, opts = {}) {
+  const maxBytes = opts.maxBytes || VERIFIED_SOURCE_MAX_BYTES;
+  const timeoutMs = opts.timeoutMs || VERIFIED_SOURCE_TIMEOUT_MS;
+  const fail = (reason) => ({ ok: false, reason });
+  const p = args && args.path;
+  const want = args && typeof args.sha256 === 'string' ? args.sha256.toLowerCase() : '';
+  if (typeof p !== 'string' || !p || p.includes('\0') || !nodePath.isAbsolute(p)
+      || !/^[0-9a-f]{64}$/.test(want)) {
+    return fail('invalid-args');
+  }
+
+  const ac = new AbortController();
+  let timedOut = false;
+  let timer;
+  const work = (async () => {
+    let fh;
+    try {
+      fh = await fsp.open(p, 'r');
+      // open が時間切れ後に返ってきても、読まずにすぐ閉じる
+      if (timedOut) return fail('timeout');
+      const st = await fh.stat();
+      if (!st.isFile()) return fail('not-file');
+      if (st.size > maxBytes) return fail('too-large');
+      const buf = await fh.readFile({ signal: ac.signal });
+      if (timedOut) return fail('timeout');
+      if (buf.length > maxBytes) return fail('too-large');
+      const got = crypto.createHash('sha256').update(buf).digest('hex');
+      if (got !== want) return fail('sha-mismatch');
+      // Buffer のままだとプールの共有 ArrayBuffer ごと渡り得るため、独立した Uint8Array にする
+      return { ok: true, bytes: new Uint8Array(buf) };
+    } catch (_) {
+      return fail(timedOut ? 'timeout' : 'read-failed');
+    } finally {
+      if (fh) { try { await fh.close(); } catch (_) { /* 閉じ失敗は結果に影響しない */ } }
+    }
+  })();
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => { timedOut = true; ac.abort(); resolve(fail('timeout')); }, timeoutMs);
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+ipcMain.handle('dicom:readVerifiedSource', async (_e, args = {}) => readVerifiedSourceImpl(args));
+
 ipcMain.handle('dicom:logLine', async (_e, args = {}) => {
   if (typeof args.text !== 'string' || !['ok', 'warn', 'err'].includes(args.level)) return { ok: false };
   // レンダラは定型文だけを送る。main 側も自由文を受け取らず患者情報の混入を防ぐ。
@@ -651,4 +715,4 @@ ipcMain.handle('dicom:logLine', async (_e, args = {}) => {
   return { ok: true };
 });
 
-module.exports = { generateUID, sendStudyImpl, runClient };
+module.exports = { generateUID, sendStudyImpl, runClient, readVerifiedSourceImpl };

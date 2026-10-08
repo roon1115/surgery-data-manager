@@ -508,7 +508,8 @@ async function runIngest(args) {
   // - dst のファイル名割当は reservedDst で同期的に予約し、同名衝突のレースを防ぐ
   // - 同一内容（同じ sha）のファイルがバッチ内に複数ある場合は inFlightBySha で調停し、
   //   最初の1つだけがコピー、残りはその完了を待って重複スキップ扱いにする
-  const CONCURRENCY = 3;
+  // SMB の smbd が詰まると同じ Mac mini の DICOM 送信にも影響するため、既定は 2 本に絞る。
+  const CONCURRENCY = [1, 2, 3].includes(cfg.ingestConcurrency) ? cfg.ingestConcurrency : 2;
   const reservedDst = new Set();
   const inFlightBySha = new Map(); // sha -> Promise<{ok:boolean}>
 
@@ -924,15 +925,6 @@ async function runIngest(args) {
         inFlightBytes.delete(i); // 進行中バイトを doneBytes へ繰り入れ
         doneBytes += f.size || 0;
 
-        // DICOM 送信対象: 種別が surgicalPhoto なら自動的に候補入り
-        // ファイル拡張子が画像系であることも軽くチェック
-        if (f.type === 'surgicalPhoto') {
-          const ext = path.extname(f.path).toLowerCase();
-          if (['.jpg','.jpeg','.png','.heic','.heif','.bmp'].includes(ext)) {
-            dicomCandidates.push({ path: dst, name: dstName });
-          }
-        }
-
         emitProgress({
           type: 'file-done',
           index: i,
@@ -971,6 +963,26 @@ async function runIngest(args) {
             if (!cancelRequested) {
               warnSkipDelete(f, i, '削除失敗: ' + (e?.message || e));
             }
+          }
+        }
+        // コピー時 SHA-256 と NAS 読み戻し SHA-256 が一致した画像だけ、残存する元を
+        // 自動送信の読み取り先にできる。削除済みなら元パスを渡さず NAS から読む。
+        // 送信・失敗キューの識別子は常に dst に固定し、後日の再送は NAS を使う。
+        if (f.type === 'surgicalPhoto') {
+          const ext = path.extname(f.path).toLowerCase();
+          if (['.jpg','.jpeg','.png','.heic','.heif','.bmp'].includes(ext)) {
+            const candidate = { path: dst, name: dstName };
+            // 削除設定の種別は削除を見送っても src が変更されている可能性がある。
+            // NAS と同一と断言できる、照合済みかつ削除対象外の元だけを使う。
+            // srcSha（コピー時に実際に読んだ内容の SHA-256）も一緒に渡す。送信直前に
+            // dicom:readVerifiedSource が SD の現物を読み直してこの値と照合する。
+            // SD の差し替え・番号の振り直しで同じパスに別症例の写真が来ても、
+            // 照合に通らなければ NAS から読むので、別の患者として送られない。
+            if (mustVerify && deleteAfterCopy[f.type] !== true) {
+              candidate.srcPath = f.path;
+              candidate.srcSha = srcSha;
+            }
+            dicomCandidates.push(candidate);
           }
         }
       } finally {

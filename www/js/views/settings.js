@@ -53,6 +53,8 @@ window.Views.settings = (function() {
     // ただし「コピー後削除」がONの種別ではこの設定に関わらず必ず照合する）
     const verifyCb = el('input', { type: 'checkbox' });
     verifyCb.checked = cfg.verifyAfterCopy !== false;
+    const elIngestConcurrency = el('input', { type: 'number', min: 1, max: 3, step: 1,
+      value: [1, 2, 3].includes(cfg.ingestConcurrency) ? cfg.ingestConcurrency : 2 });
 
     // 除外ボリューム: チェックすると取り込み元画面の検出一覧から外れる
     const excludedVolumesEl = el('div', { style: { fontSize: '12px', color: 'var(--fg-mute)' } }, '読み込み中...');
@@ -152,6 +154,19 @@ window.Views.settings = (function() {
     }}, 'C-ECHO で疎通確認');
 
     const onSave = async () => {
+      // 並列数は 1〜3 の整数だけ受け付ける。範囲外のまま送ると main が黙って捨てる
+      // （＝画面では変えたつもりなのに設定が変わらない）ため、保存前にここで止めて知らせる。
+      const concurrencyText = String(elIngestConcurrency.value).trim();
+      const concurrency = Number(concurrencyText);
+      if (concurrencyText === '' || !Number.isInteger(concurrency) || concurrency < 1 || concurrency > 3) {
+        U.modal({
+          title: '入力エラー',
+          body: '「同時にコピーするファイル数」は 1〜3 の整数で入力してください。設定は保存されていません。',
+          cancelText: '',
+        });
+        elIngestConcurrency.focus();
+        return;
+      }
       const partial = {
         outputRoot: elOutputRoot.value.trim(),
         dicom: {
@@ -185,6 +200,7 @@ window.Views.settings = (function() {
         },
         excludedVolumes: Array.from(excludedVolumesState),
         verifyAfterCopy: verifyCb.checked,
+        ingestConcurrency: concurrency,
       };
       await window.App.settings.save(partial);
       state.settings = await window.App.settings.get();
@@ -201,6 +217,7 @@ window.Views.settings = (function() {
       rBronchoscope.input, rBronchoscope.browseBtn, rBronchoscope.enabledCb, rBronchoscope.deleteCb,
       rEndoscope.input, rEndoscope.browseBtn, rEndoscope.enabledCb, rEndoscope.deleteCb,
       verifyCb,
+      elIngestConcurrency,
       refreshExcludedVolumesBtn,
     ];
 
@@ -348,6 +365,14 @@ window.Views.settings = (function() {
         'OFF にすると NAS への取り込みが大幅に速くなりますが、コピー直後のデータ破損検出が取り込み時ではなく後から見た時になります。',
         el('br'),
         '「コピー後削除」がONの種別では、この設定に関わらず必ず照合します（元データが残らないため）。'),
+
+      el('h3', null, '詳細：取り込みの並列数'),
+      el('label', { class: 'field' },
+        el('span', { class: 'label' }, '同時にコピーするファイル数（1〜3、既定 2）'),
+        elIngestConcurrency,
+      ),
+      el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginBottom: '6px' } },
+        'NAS の SMB 負荷を抑えるため、通常は 2 のまま使用してください。'),
 
       el('h3', null, '自動アップデート'),
       el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginBottom: '6px' } },
