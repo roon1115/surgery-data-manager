@@ -52,6 +52,8 @@ contextBridge.exposeInMainWorld('App', {
 
   dicom: {
     echo: (args) => ipcRenderer.invoke('dicom:echo', args),
+    openLog: () => ipcRenderer.invoke('dicom:openLog'),
+    logLine: (text, level) => ipcRenderer.invoke('dicom:logLine', { text, level }),
     sendStudy: (args) => ipcRenderer.invoke('dicom:sendStudy', args),
     queueFailure: (args) => ipcRenderer.invoke('dicom:queueFailure', args),
     listPending: () => ipcRenderer.invoke('dicom:listPending'),

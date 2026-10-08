@@ -288,6 +288,7 @@ window.Views.settings = (function() {
       el('div', { class: 'row', style: { alignItems: 'center' } },
         echoBtn,
         echoStatus,
+        el('button', { class: 'ghost', onclick: () => window.App.dicom.openLog() }, '送信ログを開く'),
       ),
       el('h3', null, '取り込み元から除外するボリューム'),
       el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginBottom: '6px' } },

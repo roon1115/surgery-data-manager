@@ -1,5 +1,7 @@
 const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron');
 const path = require('path');
+const fs = require('fs');
+const dicomLog = require('./dicom-log');
 
 require('./settings-handler');
 require('./history');
@@ -108,6 +110,17 @@ ipcMain.handle('app:openExternal', async (_e, url) => {
 ipcMain.handle('app:showFolder', async (_e, folderPath) => {
   if (typeof folderPath !== 'string' || !folderPath) return { ok: false };
   shell.showItemInFolder(folderPath);
+  return { ok: true };
+});
+
+ipcMain.handle('dicom:openLog', async () => {
+  const logPath = dicomLog.getPath();
+  if (fs.existsSync(logPath)) shell.showItemInFolder(logPath);
+  else {
+    // 初回送信前でもログの保存先を表示できるよう、userData フォルダを用意する。
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    await shell.openPath(path.dirname(logPath));
+  }
   return { ok: true };
 });
 
