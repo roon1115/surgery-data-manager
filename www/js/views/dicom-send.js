@@ -4,8 +4,8 @@ window.Views.dicom = (function() {
   const Retry = window.DicomRetry;
 
   // 一度にデコード＆送信するファイル数。大きすぎるとメモリ枯渇でレンダラがクラッシュする。
-  // 2048x2048 RGB = 約12MB/枚。20枚なら ~240MB を一時保持。
-  const BATCH_SIZE = 20;
+  // 2048x2048 RGB = 約12MB/枚。1 association を約60MB以下に抑え、遅い回線と PACS の負荷を減らす。
+  const BATCH_SIZE = 5;
 
   async function render(state, mount) {
     const candidates = (state.ingestResult && state.ingestResult.dicomCandidates) || [];
@@ -50,6 +50,15 @@ window.Views.dicom = (function() {
       const line = el('div', { class: cls || '' }, text);
       elLog.appendChild(line);
       elLog.scrollTop = elLog.scrollHeight;
+      // 画面の自由文には患者名やフルパスが含まれ得る。件数だけ抽出した定型文を main へ渡す。
+      const start = /^送信開始: (\d+) 枚/.exec(text);
+      const success = /^✓ バッチ \d+: (\d+) 枚送信成功/.exec(text);
+      const failed = /^✗ バッチ \d+: (\d+) 枚失敗/.exec(text);
+      const safeText = start ? `送信開始: ${start[1]} 枚`
+        : success ? `送信成功: ${success[1]} 枚`
+          : failed ? `送信失敗: ${failed[1]} 枚`
+            : text === 'コピー完了に続けて自動送信を開始します' ? text : null;
+      if (safeText) window.App.dicom.logLine(safeText, cls || 'ok').catch(() => {});
     }
 
     // GC/イベントループに譲るための yield ヘルパ
@@ -272,6 +281,8 @@ window.Views.dicom = (function() {
         // メモリ解放: バッチを明示的に空に → GC が走りやすくなる
         decodedBatch.length = 0;
         await yieldToUI();
+        // PACS の DB 登録を待ち、次バッチの association を立て続けに張らない。
+        if (batchIdx + 1 < batchCount) await new Promise(r => setTimeout(r, 300));
       }
 
       elProgress.firstElementChild.style.width = '100%';
