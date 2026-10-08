@@ -109,7 +109,7 @@ window.Views.dicom = (function() {
     }
 
     // ==== 送信コア（通常送信・失敗分の再送・再送キューの3経路から使う）====
-    // files: [{path, name, sopUID?, instanceNumber?}]
+    // files: [{path, name, srcPath?, srcSha?, sopUID?, instanceNumber?}]
     //        sopUID / instanceNumber を持つファイル（= 一度送信を試みた画像）は
     //        その値をそのまま再利用する（再送で PACS に重複登録させないため）。
     // opts:  { studyUID, seriesUID, startInstanceNumber, sopUIDs }（再送時に同じ Study へ追加する）
@@ -188,6 +188,18 @@ window.Views.dicom = (function() {
       ));
 
       const decodeFailedIdx = [];   // files 上の index
+      const decodeBreaker = Retry.createDecodeTimeoutBreaker(3);
+      const decodeDeps = {
+        sourceState: { timeouts: 0, disabled: false }, // 1 回の送信で共有（SD 無応答の打ち切り）
+        readVerifiedSource: (a) => window.App.dicom.readVerifiedSource(a),
+        decodeBytes: (bytes, name) => window.Decode.decodeBytesToRgb(bytes, name),
+        decodeFile: (p) => window.Decode.decodeToRgb(p),
+        canDecode: (name) => {
+          const dot = String(name).lastIndexOf('.');
+          return window.Decode.isCanvasSupportedExt(dot >= 0 ? String(name).slice(dot) : '');
+        },
+        log: (text) => logLine(text, 'warn'),
+      };
       const batchResults = [];      // [{ indices:[files上のindex], results:[main の results] }]
 
       // 進捗は「1枚 = デコード0.5 + 送信0.5」の単一式で単調に増やす
@@ -211,11 +223,25 @@ window.Views.dicom = (function() {
           const overallIdx = batchStart + i;
           elStatus.textContent = `バッチ ${batchIdx + 1}/${batchCount}　デコード中 ${overallIdx + 1}/${total}`;
           elSubStatus.textContent = c.name;
+          // 時間切れが続いたら残りはデコードせず失敗キューへ（decodeFailedIdx に入れれば
+          // 未送信として必ずキューに残る。黙って捨てない）。
+          if (decodeBreaker.isTripped()) {
+            totalDecodeFailed++;
+            decodeFailedIdx.push(overallIdx);
+            logLine('✗ decode失敗: ' + c.name + ' — デコード失敗（共有ドライブが応答しません）', 'err');
+            decodedCount = overallIdx + 1;
+            updateBar();
+            continue;
+          }
           try {
-            const dec = await window.Decode.decodeToRgb(c.path);
+            // SD の現物がコピー時の SHA-256 と一致したときだけ SD から読み、
+            // 一致しなければ NAS から読む。送信・再送キューの識別子は c.path のまま。
+            const dec = await Retry.decodeWithFallback(c, decodeDeps);
+            decodeBreaker.recordSuccess();
             decodedBatch.push(dec);
             batchIndices.push(overallIdx);
           } catch (e) {
+            decodeBreaker.recordFailure(e);
             totalDecodeFailed++;
             decodeFailedIdx.push(overallIdx);
             logLine('✗ decode失敗: ' + c.name + ' — ' + (e?.message || e), 'err');

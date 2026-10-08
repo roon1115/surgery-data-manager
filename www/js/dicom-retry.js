@@ -19,6 +19,75 @@
     return firstPositiveInt(file && file.instanceNumber, result && result.instanceNumber);
   }
 
+  // 元データ（SD）が残る直後の送信だけ、SD の現物を読む。ただし「パスが同じ」だけでは
+  // 信用しない: SD の差し替えや番号の振り直しで同じパスに別症例の写真が来ると、
+  // 別の患者の写真が送られてしまう。main の readVerifiedSource が現物の SHA-256 を
+  // コピー時の値（srcSha）と照合し、一致した bytes だけを返す。一致しない・読めない・
+  // デコードできないときは NAS に保存済みの写真から読む（NAS は取り込み時に照合済み）。
+  // srcPath を file:// で直接読む経路は持たない（同一ページ内のメモリキャッシュ混同を避ける）。
+  // 戻す画像の識別子は呼び出し側の file.path のままにする。
+  // deps: { readVerifiedSource({path,sha256}), decodeBytes(bytes,name), decodeFile(path),
+  //         canDecode?(name), log?(text) }
+  async function decodeWithFallback(file, deps) {
+    const log = (deps && deps.log) || (() => {});
+    // sourceState（呼び出し側が 1 回の送信で共有する）: SD が応答しない（時間切れ）が 2 回続いたら、
+    // その送信の残りは SD を読まずに NAS から読む。1 枚ごとに 30 秒待つと 100 枚で 50 分止まり、
+    // 時間切れ後も残る読み込みが main のスレッドプールを埋めるため（Opus レビュー 2 巡目）。
+    const st = deps && deps.sourceState;
+    const useSource = file.srcPath && file.srcSha && !(st && st.disabled)
+      && !(deps.canDecode && !deps.canDecode(file.srcPath));
+    if (useSource) {
+      let reason = null;
+      try {
+        const r = await deps.readVerifiedSource({ path: file.srcPath, sha256: file.srcSha });
+        if (r && r.ok && r.bytes) {
+          try {
+            return await deps.decodeBytes(r.bytes, file.srcPath);
+          } catch (_) {
+            reason = 'decode-failed';
+          }
+        } else {
+          reason = (r && r.reason) || 'unknown';
+        }
+      } catch (_) {
+        reason = 'ipc-error';
+      }
+      if (st) {
+        st.timeouts = reason === 'timeout' ? (st.timeouts || 0) + 1 : 0;
+        if (st.timeouts >= 2 && !st.disabled) {
+          st.disabled = true;
+          log('SD が応答しないため、残りの写真は NAS から読みます');
+        }
+      }
+      // sha-mismatch だけが「中身が違う」。それ以外（抜いた・読めない・時間切れ）を同じ文言にすると
+      // 「別の患者の写真が混ざったのか」と誤解させるので書き分ける（Opus レビュー 2 巡目）。
+      log(reason === 'sha-mismatch'
+        ? `SD の写真がコピー時と一致しないため NAS から読みます: ${file.name || ''}`
+        : `SD の写真を読めないため NAS から読みます: ${file.name || ''}（${reason}）`);
+    }
+    return deps.decodeFile(file.path);
+  }
+
+  // 共有ドライブが応答しないとき、1 枚ごとに 60 秒待つと残りの枚数ぶん何十分も画面が固まる。
+  // デコード時間切れが limit 回連続したら tripped になり、呼び出し側は残りをデコードせず
+  // 失敗キューへ回す。時間切れ以外の失敗や成功で連続回数はリセットされる。
+  function createDecodeTimeoutBreaker(limit = 3) {
+    let streak = 0;
+    let tripped = false;
+    return {
+      recordSuccess() { streak = 0; },
+      recordFailure(err) {
+        if (err && err.decodeTimeout) {
+          streak += 1;
+          if (streak >= limit) tripped = true;
+        } else {
+          streak = 0;
+        }
+      },
+      isTripped() { return tripped; },
+    };
+  }
+
   // main が返した results を「files 上の index → result」に畳み込む。
   // バッチごとの indices（送信した画像の位置 → files 上の index）を介さないと、
   // デコード失敗でバッチ内の位置がずれたときに別ファイルの結果を拾ってしまう。
@@ -161,6 +230,8 @@
   }
 
   return {
+    decodeWithFallback,
+    createDecodeTimeoutBreaker,
     collectFailures,
     buildAttemptedFiles,
     mergeQueueFiles,

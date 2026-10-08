@@ -13,16 +13,66 @@ window.Views.preview = (function() {
   // 拡張子から判定（DICOM対象写真かどうかの目安）
   const PHOTO_EXT = new Set(['.jpg', '.jpeg', '.png', '.heic', '.heif', '.bmp']);
 
+  const MEDIA_TYPES = new Set(['surgicalPhoto', 'laparoscope', 'bronchoscope', 'endoscope']);
+
+  // カメラ・内視鏡レコーダーが自動で作る管理ファイル（拒否リスト）。写真・動画の種別では
+  // 既定でコピーしない。「写真・動画以外は外す」方式にしないのは、内視鏡の .mpg/.ts/.m2ts/.dcm
+  // やカメラの RAW（.cr2/.nef/.arw/.dng ...）まで黙ってコピーされなくなるため。
+  // ここに挙げた既知の管理ファイル以外は従来どおり既定で選択する。
+  const CAMERA_MGMT_EXT = new Set(['.thm', '.ctg', '.bdm', '.mpl', '.cpi', '.tbl', '.b00', '.d00']);
+  const AVCHD_MGMT_EXT = new Set(['.bdm', '.mpl', '.cpi', '.xml', '.bin']);
+  const CAMERA_MGMT_NAME = /^(contents\..*|groupinf\..*|fileinfo\.tbl)$/;
+
+  function isCameraManagementFile(file) {
+    // 取り込み元ルートからの相対パスを優先する（絶対パスだと NAS 側のフォルダ名
+    // 〈例: /private/...〉をカメラの PRIVATE/ と取り違えるため）。無い時は名前だけで判定。
+    const rel = file && typeof file.relPath === 'string' && file.relPath ? file.relPath : null;
+    const raw = rel || (file && file.path) || '';
+    const segs = String(raw).replace(/\\/g, '/').split('/').filter(Boolean).map(s => s.toLowerCase());
+    if (segs.length === 0) return false;
+    const name = segs[segs.length - 1];
+    const dot = name.lastIndexOf('.');
+    const ext = dot >= 0 ? name.slice(dot) : '';
+    if (CAMERA_MGMT_NAME.test(name) || CAMERA_MGMT_EXT.has(ext)) return true;
+    if (!rel) return false;
+    const dirs = segs.slice(0, -1);
+    if (dirs.includes('misc')) return true;
+    if ((dirs.includes('avchd') || dirs.includes('private')) && AVCHD_MGMT_EXT.has(ext)) return true;
+    return false;
+  }
+
+  // 重複チェックは未取込ファイルをプレビュー前に selected=true にすることがある。
+  // カメラ管理ファイルを既定で外す判定はここで行い、個別に選んだ意思は上書きしない。
+  // autoDeselected は重複チェック専用の印なので、この既定選択には使わない。
+  function defaultSelection(type, file) {
+    if (file.manualSelection) return file.selected;
+    if (MEDIA_TYPES.has(type) && isCameraManagementFile(file)) return false;
+    // 種別を写真系から麻酔記録へ変更したら、この画面が外した分だけ戻す。
+    // 既取込の自動解除は維持し、未送信や削除判断へ重複を再投入しない。
+    if (file.previewDefaultExcluded && !file.alreadyImported) return true;
+    return file.selected === undefined ? true : file.selected;
+  }
+
+  // 既定の適用はファイルごとに 1 回だけ。render は戻る操作などで何度も走るため、毎回適用すると
+  // 「全選択」や重複チェックの結果で選んだ状態が既定に巻き戻る。ただし種別が変わった時は
+  // 新しい種別の既定を 1 回適用し直す（previewDefaultApplied は適用済みの種別も覚える）。
+  function applyPreviewDefault(type, file) {
+    if (file.previewDefaultApplied && file.previewDefaultType === type) return;
+    file.selected = defaultSelection(type, file);
+    file.previewDefaultExcluded = !file.manualSelection && MEDIA_TYPES.has(type)
+      && isCameraManagementFile(file);
+    file.previewDefaultApplied = true;
+    file.previewDefaultType = type;
+  }
+
   async function render(state, mount) {
     const cfg = state.settings || await window.App.settings.get();
     state.settings = cfg;
     const typeFolders = cfg.typeFolders || {};
 
-    // 初回: 全ファイルを selected=true で初期化
+    // 写真・動画の種別ではカメラの管理ファイルだけを既定で外す（ファイルごとに 1 回）。
     for (const src of state.sources) {
-      for (const f of src.files) {
-        if (f.selected === undefined) f.selected = true;
-      }
+      for (const f of src.files) applyPreviewDefault(src.type, f);
     }
 
     // フォルダ名プレビュー（patient + date から計算、ingest:prepareTarget と同じロジック）
@@ -108,6 +158,7 @@ window.Views.preview = (function() {
         // 選択状況の行はチェックボックス操作のたびに更新されるため、
         // リスト全体を作り直さず（＝スクロール位置を失わず）この行だけ書き換える
         const statsLine = el('div', { style: { flex: '1', fontSize: '12px' } });
+        const nonMediaLine = el('div', { style: { fontSize: '11px', color: 'var(--fg-mute)', marginBottom: '8px' } });
         const updateStatsLine = () => {
           // 「除外済み」表示は実際の選択状態ベース（既取込でも再選択されていれば除外扱いしない）
           const dupExcludedCount = src.files.filter(f => f.alreadyImported && !f.selected).length;
@@ -124,6 +175,12 @@ window.Views.preview = (function() {
                   `／ ⚠ 既取込 ${dupCount - dupExcludedCount} 件が選択中`)
               : document.createTextNode(''),
           );
+          const mgmtCount = MEDIA_TYPES.has(src.type)
+            ? src.files.filter(f => isCameraManagementFile(f) && !f.selected && !f.alreadyImported).length
+            : 0;
+          nonMediaLine.textContent = mgmtCount > 0
+            ? `カメラの管理ファイル ${mgmtCount} 件は既定でコピーしません（必要なら選択してください）`
+            : '';
         };
         updateStatsLine();
 
@@ -234,6 +291,7 @@ window.Views.preview = (function() {
             statsLine,
             allOnBtn, allOffBtn, toggleBtn,
           ),
+          nonMediaLine,
           fileListEl,
         );
         sourcesEl.appendChild(card);
@@ -338,5 +396,5 @@ window.Views.preview = (function() {
     renderSummary();
   }
 
-  return { render };
+  return { render, defaultSelection, applyPreviewDefault, isCameraManagementFile };
 })();

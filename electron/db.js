@@ -316,7 +316,7 @@ const SIZE_FILTER_RETRY_MS = 60 * 1000;
 // 並列化しても終わらないほど古い/遅い環境では、待たせ続けるより「しばらくは
 // サイズ事前フィルタ無効（＝従来どおり全量ハッシュ）」に倒す方が体感が読める。
 // 成功した分の補完はジャーナルに追記済みなので、再試行時は残りから前進できる。
-const FILL_CONCURRENCY = 8;
+const FILL_CONCURRENCY = 4;
 const FILL_BUDGET_MS = 5000;
 
 async function getKnownSizes() {
